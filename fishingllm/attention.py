@@ -71,14 +71,6 @@ class MultiHeadAttention(nn.Module):
     def clear_mask_cache():
         MultiHeadAttention._mask_cache.clear()
 
-    def _expand_kv(self, x: torch.Tensor) -> torch.Tensor:
-        """Expand KV heads для GQA без копирования памяти (expand вместо repeat_interleave)."""
-        if self.n_rep == 1:
-            return x
-        B, H, L, D = x.shape
-        x = x.unsqueeze(2).expand(B, H, self.n_rep, L, D)
-        return x.reshape(B, H * self.n_rep, L, D)
-
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor | None = None, return_attn: bool = False
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -88,8 +80,9 @@ class MultiHeadAttention(nn.Module):
         K = self.W_k(x).view(B, L, self.n_kv_heads, self.d_k).transpose(1, 2)
         V = self.W_v(x).view(B, L, self.n_kv_heads, self.d_k).transpose(1, 2)
 
-        K = self._expand_kv(K)
-        V = self._expand_kv(V)
+        if self.n_rep > 1:
+            K = K.repeat_interleave(self.n_rep, dim=1)
+            V = V.repeat_interleave(self.n_rep, dim=1)
 
         if mask is None:
             mask = self._create_causal_mask(L, x.device)
