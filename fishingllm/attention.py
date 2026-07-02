@@ -61,15 +61,6 @@ class MultiHeadAttention(nn.Module):
         mask = torch.triu(torch.full((seq_len, seq_len), True, dtype=torch.bool, device=device), diagonal=1)
         return mask.unsqueeze(0)  # (1, L, L)
 
-    def _repeat_kv(self, x: torch.Tensor) -> torch.Tensor:
-        """Повторяет KV-головы для GQA: (B, L, n_kv*d_k) -> (B, L, n*d_k)."""
-        if self.n_rep == 1:
-            return x
-        B, L, _ = x.shape
-        x = x.view(B, L, self.n_kv_heads, self.d_k)
-        x = x[:, :, :, None, :].expand(B, L, self.n_kv_heads, self.n_rep, self.d_k)
-        return x.reshape(B, L, self.n_heads * self.d_k)
-
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor | None = None, return_attn: bool = False
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
