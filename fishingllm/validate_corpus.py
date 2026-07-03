@@ -1,5 +1,4 @@
 import json
-import os
 import unicodedata
 from hashlib import sha256
 from pathlib import Path
@@ -35,6 +34,10 @@ VALID_FAILURE_REASONS = frozenset({
     "low_activity", "unknown",
 })
 
+VALID_OPERATORS = frozenset({">", "<", ">=", "<=", "==", "!=", "in", "between"})
+
+ACCEPTED_SCHEMA_VERSION = "1.3"
+
 
 class CorpusError(Exception):
     pass
@@ -65,7 +68,6 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
     errors: list[str] = []
 
     all_records: dict[str, dict[str, Any]] = {}
-    type_counts: dict[str, int] = {}
     raw_hashes: dict[str, str] = {}
 
     processed_dir = data_dir / "processed"
@@ -84,12 +86,13 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
             all_records[rid] = rec
 
             rtype = rec.get("type", "unknown")
-            type_counts[rtype] = type_counts.get(rtype, 0) + 1
 
             # schema_version
             sv = rec.get("schema_version")
             if sv is None:
                 errors.append(f"{rid}: missing schema_version")
+            elif sv != ACCEPTED_SCHEMA_VERSION:
+                errors.append(f"{rid}: schema_version '{sv}' != '{ACCEPTED_SCHEMA_VERSION}'")
 
             # id_prefix consistency
             prefix = rec.get("id_prefix", "")
@@ -110,14 +113,13 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
                 else:
                     raw_hashes[rid] = h
 
-            # type-specific validation (per-record checks)
+            # type-specific validation
             try:
                 _validate_record(rec, fname, rid)
             except CorpusError as e:
                 errors.append(str(e))
 
-    # Second pass: cross-record checks
-    # based_on references
+    # Second pass: based_on references
     for rid, rec in all_records.items():
         based_on = rec.get("based_on", [])
         if isinstance(based_on, list):
@@ -125,12 +127,14 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
                 if ref not in all_records:
                     errors.append(f"{rid}: based_on references non-existent '{ref}'")
 
-    # D8: all IDs (except raw and relation) must be referenced in relation graph
+    # D8: all IDs (except raw and relation) must be in relation graph
     relation_targets = set()
     for rec in all_records.values():
         if rec.get("type") == "relation":
-            relation_targets.add(rec.get("from"))
-            relation_targets.add(rec.get("to"))
+            if rec.get("from"):
+                relation_targets.add(rec["from"])
+            if rec.get("to"):
+                relation_targets.add(rec["to"])
 
     for rid, rec in all_records.items():
         rtype = rec.get("type")
@@ -144,7 +148,10 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
     for rec in all_records.values():
         if rec.get("type") == "relation" and rec.get("relation") == "derived_from":
             derived[rec["from"]] = rec["to"]
+    visited_global = set()
     for start in derived:
+        if start in visited_global:
+            continue
         visited = set()
         current = start
         while current in derived:
@@ -152,6 +159,7 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
                 errors.append(f"cycle in derived_from graph involving '{current}'")
                 break
             visited.add(current)
+            visited_global.add(current)
             current = derived[current]
 
     return errors
@@ -172,34 +180,32 @@ def _validate_record(rec: dict, fname: str = "", rid: str = ""):
             raise CorpusError(f"{rid}: session requires datetime_start and datetime_end")
 
     elif rtype == "observation":
-        # D1: no success field
         if "success" in rec:
             raise CorpusError(f"{rid}: observation.success is forbidden (D1)")
-        # conditions + effort + result
         if "conditions" not in rec:
             raise CorpusError(f"{rid}: observation.conditions is required")
         if "effort" not in rec:
             raise CorpusError(f"{rid}: observation.effort is required")
         if "result" not in rec:
             raise CorpusError(f"{rid}: observation.result is required")
-        # catch must be array
         catch = rec["result"].get("catch", [])
         if not isinstance(catch, list):
             raise CorpusError(f"{rid}: result.catch must be an array")
-        # D2: no interpretations — no strict check, advisory
-        # missing_factors must be array of strings
         mf = rec.get("missing_factors", [])
         if not isinstance(mf, list):
             raise CorpusError(f"{rid}: missing_factors must be an array")
 
     elif rtype == "hypothesis":
-        # D3: formal_rule required
         fr = rec.get("formal_rule")
         if not isinstance(fr, dict):
             raise CorpusError(f"{rid}: hypothesis.formal_rule is required (D3)")
-        if not fr.get("variable") or not fr.get("operator"):
-            raise CorpusError(f"{rid}: formal_rule.variable and operator are required")
-        fr.get("value")  # value can be any, but must exist
+        if not fr.get("variable"):
+            raise CorpusError(f"{rid}: formal_rule.variable is required")
+        op = fr.get("operator")
+        if not op:
+            raise CorpusError(f"{rid}: formal_rule.operator is required")
+        if op not in VALID_OPERATORS:
+            raise CorpusError(f"{rid}: formal_rule.operator '{op}' not in {sorted(VALID_OPERATORS)}")
         if "value" not in fr:
             raise CorpusError(f"{rid}: formal_rule.value is required")
 
@@ -218,13 +224,11 @@ def _validate_record(rec: dict, fname: str = "", rid: str = ""):
         status = rec.get("status")
         if status not in VALID_STATUSES:
             raise CorpusError(f"{rid}: analysis.status '{status}' invalid")
-        # causal_links validation
         for cl in rec.get("causal_links", []):
             if not cl.get("factor") or not cl.get("effect"):
                 raise CorpusError(f"{rid}: causal_link requires factor and effect")
 
     elif rtype == "recommendation":
-        # D5: text + actions
         if not rec.get("text"):
             raise CorpusError(f"{rid}: recommendation.text is required (D5)")
         actions = rec.get("actions", [])
