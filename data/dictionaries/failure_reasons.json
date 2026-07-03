@@ -1,0 +1,12 @@
+{
+  "dictionary_version": "1.0",
+  "failure_reasons": [
+    {"id": "failure_none", "name": "none", "description": "Успех, причина провала не применима"},
+    {"id": "failure_conditions", "name": "conditions_not_met", "description": "Условия рыбалки не соответствовали рекомендации"},
+    {"id": "failure_wrong_spot", "name": "wrong_spot", "description": "Неправильно выбран участок водоёма"},
+    {"id": "failure_weather", "name": "weather_changed", "description": "Погода изменилась после формулировки рекомендации"},
+    {"id": "failure_equipment", "name": "equipment_difference", "description": "Снаряжение отличалось от рекомендованного"},
+    {"id": "failure_low_activity", "name": "low_activity", "description": "Рыба не активна (естественные причины)"},
+    {"id": "failure_unknown", "name": "unknown", "description": "Причина не установлена"}
+  ]
+}

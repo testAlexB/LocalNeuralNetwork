@@ -1,427 +1,707 @@
-# Спецификация датасета FishingLLM
+# Спецификация датасета FishingLLM v1.3
 
 ## 1. Цель
 
-Обучить модель рассуждать о рыбалке в Тверской области: анализировать факторы, обобщать опыт, взвешивать противоречия, строить рекомендации на основе данных, вести живой диалог.
+Обучить модель рассуждать о рыбалке в Тверской области: анализировать факторы, выдвигать формальные гипотезы, агрегировать свидетельства, строить каузальные связи, давать машинно-исполнимые рекомендации, учиться на outcome.
 
 ## 2. Требования к модели (целевое поведение)
 
-- Анализировать любые факторы (водоём, погода, сезон, давление, фаза луны, прозрачность воды, уровень воды, ветер, температура воды/воздуха, время суток, тип дна, течение) и делать выводы
-- Рассуждать на основе фактов, а не просто отвечать на вопросы
-- Обобщать данные из множества источников
-- Взвешивать противоречивые данные, указывать на неоднозначности
-- Строить планы на рыбалку на основе набора вводных
-- Признавать незнание: «у меня нет данных по этому водоёму»
-- Запрашивать уточнения при недостатке информации
-- Вести живой многообменный диалог (10+ реплик)
-- Генерировать структурированные ответы (JSON для агентского режима)
+- Анализировать факторы (водоём, погода, сезон, давление, фаза луны, прозрачность воды, уровень воды, ветер, температура, время суток, тип дна, течение) и делать выводы
+- Выдвигать формальные гипотезы: «water_temp > 20 → catch_rate снижается»
+- Синтезировать противоречивые свидетельства с весами
+- Различать корреляцию и причинность
+- Строить явные каузальные связи с учётом confounders
+- Давать машинно-исполнимые рекомендации (actions[])
+- Признавать незнание и указывать причины неуспеха
+- Вести диалог с указанием уверенности
+- Генерировать JSON для агентского режима
 - Быть вежливой, экспертной, но доступной
 
-## 3. Pipeline данных (архитектура)
-
-Данные проходят через четыре слоя, каждый опирается на предыдущий:
+## 3. Архитектура пайплайна
 
 ```
-Исходный документ (сырой текст, пост форума, страница книги)
+Исходный документ (сырой текст)
       │
       ▼
-Observation — «что произошло» (факты без интерпретации)
-  id, water_body, season, fish, weather, result
+Raw observation (дословно, НИКОГДА не изменяется)
       │
       ▼
-Analysis — рассуждение на основе observation
-  on top of: [obs001, obs014, obs122]
-  → analysis → recommendation
-      │
-      ▼
-Dialogue — диалог, опирающийся на analysis
-  ChatML format
+Session — одна рыболовная поездка
+      ├──────────────────┐
+      ▼                  ▼
+Environment         Observation
+(ambient, source)   (conditions + effort + result)
+      │                  │
+      └─────┬────────────┘
+            ▼
+      Hypothesis (formal_rule, variable, operator, value)
+            │
+            ▼
+      Evidence synthesis (evidence[] с weight)
+            │
+            ▼
+      Analysis (status + causal_links + alternative_explanations)
+            │
+            ▼
+      Recommendation (actions[] + based_on: [analysis, evidence_synthesis])
+            │
+            ▼
+      Outcome (execution_match + failure_reason)
+            │
+      ┌─────┴─────┐
+      ▼           ▼
+  Relation     Dialogue
+  (graph edge)
 ```
 
-Каждый analysis ссылается на конкретные observation через `based_on`, а не копирует их данные. Это позволяет пересобирать датасет при изменении первичных записей.
-
-Пример цепочки:
+## 4. Принцип неизменности
 
 ```
-obs001: 15 июня, Верхняя Волга, судак, джиг 12г, t 18°C, улов 3 шт
-obs014: 20 июня, Верхняя Волга, судак, джиг 15г, t 19°C, улов 2 шт
-obs122: 10 июля, Верхняя Волга, судак, джиг 10г, t 22°C, улов 0 шт
-
-analysis:
-  based_on: [obs001, obs014, obs122]
-  analysis: "Из 3 наблюдений: при 18-19°C стабильный улов, при 22°C — пусто. Делаю вывод..."
-  recommendation: "Оптимальная температура для судака на Верхней Волге — до 20°C"
+raw_observation    — НИКОГДА не изменяется
+session            — может пересоздаваться
+environment        — может пересоздаваться
+observation        — может пересоздаваться (только факты, не интерпретации)
+hypothesis         — может удаляться
+evidence_synthesis — может пересчитываться
+analysis           — может пересчитываться
+recommendation     — может пересоздаваться
+outcome            — не изменяется (фактический результат)
+relation           — может пересоздаваться (граф перестраивается)
+dialogue           — может генерироваться заново
 ```
 
-## 4. Единица анализа
+## 5. Строгие правила (инварианты)
 
-**Observation** = одна рыболовная сессия на одном водоёме в один день одним рыбаком.
+### D1. Success только вычисляется
+`success = (result.catch.length > 0)`. Поле `success` в observation запрещено.
 
-Из одного поста на форуме может получиться несколько observation (рыбак ловил на разных участках или в разные дни). Одна тема форума = один исходный документ. Одна страница книги = один исходный документ.
+### D2. Observation = факты, не интерпретации
+Запрещено в observation: выводы, гипотезы, причинные объяснения, оценки «хорошо/плохо».
 
-**Analysis** = одно рассуждение на основе одного или нескольких observation.
+### D3. Hypothesis должна быть проверяемой
+Обязательно: `formal_rule.variable`, `formal_rule.operator`, `formal_rule.value`.
 
-**Dialogue** = одна беседа на основе одного или нескольких analysis.
+### D4. Evidence всегда имеет weight
+Каждый entry в `evidence[]` обязан содержать `weight` (0.0–1.0).
 
-## 5. Факторы (полный, открытый список)
+### D5. Recommendation всегда содержит human text и machine actions
+Оба поля обязательны: `text` (для человека) и `actions[]` (для машины).
 
-**Обязательные** (должны быть в каждой записи analysis): водоём (название), сезон, целевая рыба.
+### D6. Outcome всегда содержит execution_match и failure_reason
+`failure_reason` — всегда, даже при success (значение `"none"`).
 
-**Опциональные** (чем больше, тем качественнее анализ):
+### D7. Граф-совместимость
+Любой `based_on` должен иметь альтернативное представление через Relation.
 
-- **Водоём (детали):** название, тип (озеро/река/вдхр), площадь, глубина, тип дна, прозрачность, уровень воды, течение, зарастаемость
-- **Сезон:** весна (преднерест/нерест/посленерест), лето (начало/середина/конец), осень (начало/глубокая), зима (первый лёд/глухозимье/последний лёд)
-- **Погода:** t воздуха, t воды, атмосферное давление (растёт/падает/стабильно), ветер (направление, сила), осадки, облачность
-- **Время суток:** рассвет, утро, день, вечер, закат, ночь
-- **Фаза луны:** новолуние, 1 четверть, полнолуние, последняя четверть
-- **Гидрология:** паводок, межень, сброс воды ГЭС, цветение воды
-- **Снасть:** спиннинг, фидер, поплавок, донка, мормышка, кружки, жерлицы
-- **Приманка:** блесна, воблер, джиг, силикон, червь, опарыш, кукуруза, мотыль, мормыш
-- **Тактика:** проводка (равномерная, ступенчатая, твичинг), точка ловли, прикормка
-- **Рыба:** вид, размер, активность, фаза жизненного цикла
+### D8. Все ID ссылаются в relation graph
+Каждая запись (кроме raw_observation) должна быть узлом в relation graph — иметь минимум одну relation, где она выступает `from` или `to`.
 
-Список открытый — любые дополнительные факторы включаются по мере обнаружения.
+### D9. Графовые ограничения
+- Запрещены циклы в цепочках `derived_from`
+- Запрещены relation на несуществующие id
+- raw_observation — единственный тип без обязательной relation (корень графа)
 
-## 6. Источники данных
+## 6. Формат факторов
 
-Любые источники, содержащие релевантную информацию о рыбалке в Тверской области:
+**Точное значение:**
+```json
+"water_temp": 18
+```
 
-- Форумы и чаты (РусФишинг, Fishers.spb, VK, Telegram)
-- Статьи и блоги (профильные сайты, YouTube-расшифровки)
-- Книги (Сабанеев, Кузнецов, Матвеев, региональные издания)
-- Научные статьи (ихтиология, гидробиология, лимнология)
-- Отчёты о рыбалке (личные дневники, fishbrain, social media)
-- Нормативные документы (правила рыболовства, приказы Минсельхоза)
-- Устные истории (расшифровки интервью с опытными рыбаками)
-- Метеоданные + logbook (сопоставление погоды и уловов)
+**С неопределённостью:**
+```json
+"water_temp": {"value": 18, "estimated": true, "measurement_error": 2}
+```
 
-## 7. Data Provenance (происхождение данных)
-
-### Общие поля для всех записей
+## 7. География
 
 ```json
 {
-  "id": "hex_id_with_prefix",
-  "type": "observation|analysis|dialogue|fact|experience|insufficient_data",
-  "source_document": {"type": "forum_post|forum_thread|book_page|article|...",
-                      "title": "...",
-                      "url": "..."},
+  "water_body_id": "wb_seliger_001",
+  "water_body_name": "Селигер",
+  "type": "озеро",
+  "gazetteer_version": "1.0",
+  "aliases": ["оз.Селигер", "озеро Селигер"],
+  "location": {"lat": 57.2, "lon": 33.1, "region": "Тверская область"},
+  "spots": [
+    {"spot_id": "wbs_seliger_001", "name": "остров Хачин"}
+  ]
+}
+```
+
+## 8. Словари
+
+```
+data/dictionaries/
+  species.json           — виды рыб + алиасы
+  bait.json              — наживки + алиасы
+  tackle.json            — снасти + алиасы
+  bottom_types.json      — типы дна
+  weather_terms.json     — погодные термины
+  failure_reasons.json   — таксономия причин провала
+```
+
+Каждый имеет `dictionary_version`.
+
+`failure_reasons.json`:
+```json
+{
+  "dictionary_version": "1.0",
+  "failure_reasons": [
+    "none", "conditions_not_met", "wrong_spot",
+    "weather_changed", "equipment_difference",
+    "low_activity", "unknown"
+  ]
+}
+```
+
+## 9. Provenance
+
+```json
+{
+  "id": "prefix_00001",
+  "type": "raw_observation|session|environment|observation|hypothesis|evidence_synthesis|analysis|recommendation|outcome|relation|dialogue|fact|experience|insufficient_data|uncertainty",
+  "schema_version": "1.3",
+  "source_document": {
+    "type": "forum_post|book_page|article|interview",
+    "title": "...", "url": "..."
+  },
   "source_reliability": 0.0-1.0,
-  "author": "username|book_author",
-  "license": "public_domain|fair_use|author_permission",
-  "created_by": "script_name|human_annotator",
-  "date_recorded": "2024-06-15",
+  "author": "...",
+  "created_by": "human_annotator",
+  "extractor_version": "v1.0",
+  "dictionary_version": "1.0",
+  "datetime": "2024-06-15T05:30:00",
   "date_processed": "2024-07-01"
 }
 ```
 
-### Шкала source_reliability
+### Шкалы
 
-| Значение | Тип источника | Пример |
-|----------|--------------|--------|
-| 1.0 | Рецензируемая наука | Ихтиологический журнал |
-| 0.9 | Официальные документы | Приказ Минсельхоза, правила рыболовства |
-| 0.8 | Книги (профессиональные) | Сабанеев, Кузнецов |
-| 0.7 | Книги (любительские) | Мемуары рыболова |
-| 0.6 | Опытные участники форума | Признанные эксперты, 1000+ сообщений |
-| 0.4 | Единичные отчёты | Пост новичка, непроверенные данные |
-| 0.2 | Неподтверждённые слухи | «Мне друг рассказывал» |
+**source_reliability:**
+| 1.0 | Наука | 0.8 | Проф.книги | 0.6 | Опытные форум | 0.4 | Единичные отчёты | 0.2 | Слухи |
 
-### Шкала analysis_confidence
+**observation_quality:**
+| 1.0 | Все факторы измерены | 0.7 | Большинство указано | 0.4 | Минимум | 0.1 | Почти без данных |
 
-Это оценка уверенности в самом анализе, а не качестве источника.
+**analysis_confidence:**
+| 0.9+ | Много наблюдений | 0.6–0.8 | Есть разброс | 0.3–0.5 | Мало/противоречиво | 0–0.2 | Единичные |
 
-| Значение | Условие |
-|----------|---------|
-| 0.9-1.0 | Много наблюдений, непротиворечивых, все факторы совпадают |
-| 0.6-0.8 | Несколько наблюдений, есть разброс, но общая тенденция ясна |
-| 0.3-0.5 | Мало наблюдений ИЛИ данные противоречивы |
-| 0.0-0.2 | Единичные наблюдения, вывод предположительный |
+**evidence_strength:**
+| высокая | 50+ набл., неск. источников | средняя | 10–50, 2+ ист. | низкая | <10 или 1 ист. |
 
-Пример:
-- 1 observation с source_reliability=1.0, но analysis_confidence=0.3 (мало данных)
-- 50 observation с source_reliability=0.4, но analysis_confidence=0.9 (много непротиворечивых данных)
+## 10. Типы записей
 
-## 8. Требования к объёму
+### raw_observation
 
-Минимальный целевой объём — 50 МБ чистого текста, жёсткой границы нет. Ориентир: от 50 МБ до 500 МБ+ на финальную версию.
+```json
+{
+  "id": "raw00001",
+  "type": "raw_observation",
+  "schema_version": "1.3",
+  "text": "Сегодня с утра был на Волге у Хотина. Ловил на джиг. Поймал двух судаков, одного окуня. Вода градусов 18, давление вроде нормальное.",
+  "source_document": {"type": "forum_post", "title": "Отчёт 15.06.2024"},
+  "source_reliability": 0.4,
+  "author": "pike_hunter_69",
+  "datetime": "2024-06-15T05:30:00",
+  "id_prefix": "raw"
+}
+```
 
-Первая итерация: 5-10 МБ для проверки пайплайна.
+### session
 
-## 9. Типы записей и JSON Schema
+```json
+{
+  "id": "ses00001",
+  "type": "session",
+  "schema_version": "1.3",
+  "based_on_raw": ["raw00001"],
+  "water_body_id": "wb_volga_upper",
+  "water_body_name": "Верхняя Волга",
+  "datetime_start": "2024-06-15T05:00:00",
+  "datetime_end": "2024-06-15T14:00:00",
+  "season": "июнь",
+  "source_reliability": 0.4,
+  "observation_quality": 0.7,
+  "extractor_version": "v1.0",
+  "dictionary_version": "1.0",
+  "id_prefix": "ses"
+}
+```
 
-### observation — первичное наблюдение
+### environment
 
-**Единица:** одна рыболовная сессия, один водоём, один день, один рыбак.
+```json
+{
+  "id": "env00001",
+  "type": "environment",
+  "schema_version": "1.3",
+  "session_id": "ses00001",
+  "datetime": "2024-06-15T05:30:00",
+  "source": "angler",
+  "air_temp": {"value": 22, "estimated": true, "measurement_error": 3},
+  "water_temp": 18,
+  "pressure_hpa": 748,
+  "pressure_trend": "стабильное",
+  "wind_speed": 3,
+  "wind_direction": "СЗ",
+  "moon_phase": "полнолуние",
+  "clouds": "ясно",
+  "precipitation": "нет",
+  "visibility": "хорошая",
+  "water_level": "нормальный",
+  "water_clarity": "прозрачная",
+  "id_prefix": "env"
+}
+```
 
-**Обязательные поля:** id, type, water_body, season, result.
+### observation — факты, без интерпретаций
 
-**result может быть:**
-- `catch: "3 судака, 2 окуня"` (успешная рыбалка)
-- `catch: null` (не было поклёвок — отрицательный пример, **очень ценен**)
+`success` отсутствует (вычисляется). `effort` обязателен.
 
 ```json
 {
   "id": "obs00001",
   "type": "observation",
-  "water_body": "Верхняя Волга, д. Хотино",
-  "season": "июнь",
-  "fish": "судак",
-  "water_temp": 18,
-  "tackle": "джиг 12г",
-  "depth": 5,
-  "bottom": "каменистое",
-  "current": "слабое",
-  "pressure": "стабильное",
+  "schema_version": "1.3",
+  "session_id": "ses00001",
+  "environment_id": "env00001",
   "time_of_day": "утро",
-  "result": {"catch": "3 судака, 1 окунь"},
-  "source_document": {"type": "forum_post", "url": "https://..."},
-  "source_reliability": 0.6,
-  "date_recorded": "2024-06-15",
+  "datetime": "2024-06-15T05:30:00",
+  "conditions": {
+    "depth": 5,
+    "bottom_type": "каменистое",
+    "current": "слабое",
+    "tackle": "джиг 12г",
+    "target_species": "судак"
+  },
+  "effort": {
+    "hours_fished": 3.5,
+    "casts": 45,
+    "distance_km": null
+  },
+  "result": {
+    "catch": [
+      {"fish": "судак", "count": 2, "weight_kg": null},
+      {"fish": "окунь", "count": 1, "weight_kg": null}
+    ]
+  },
+  "missing_factors": ["wind_speed", "moon_phase"],
+  "observation_quality": 0.7,
   "id_prefix": "obs"
 }
 ```
 
-**Успешная и неуспешная рыбалка:**
-
-```json
-{"id": "obs00002", "type": "observation", "water_body": "Верхняя Волга",
- "season": "июль", "fish": "судак", "result": {"catch": null}}
-```
-
-Неуспешные наблюдения критичны — без них модель будет думать, что рыба ловится всегда.
-
-### fact — проверяемый факт
+Неуспешное наблюдение (success = false, т.к. catch пуст):
 
 ```json
 {
-  "id": "fac00001",
-  "type": "fact",
-  "content": "Судак на Селигере предпочитает глубины 4-8 м с каменистым дном.",
-  "source_document": {"type": "scientific_article", "title": "Ихтиология Верхней Волги"},
-  "source_reliability": 0.9,
-  "id_prefix": "fac"
+  "id": "obs00002",
+  "type": "observation",
+  "schema_version": "1.3",
+  "session_id": "ses00001",
+  "environment_id": "env00001",
+  "time_of_day": "день",
+  "datetime": "2024-06-15T12:00:00",
+  "conditions": {
+    "depth": 5,
+    "target_species": "судак"
+  },
+  "effort": {
+    "hours_fished": 2.0,
+    "casts": 30,
+    "distance_km": null
+  },
+  "result": {
+    "catch": []
+  },
+  "missing_factors": ["bottom_type", "current", "tackle"],
+  "observation_quality": 0.4,
+  "id_prefix": "obs"
 }
 ```
 
-### experience — эмпирическое наблюдение (обобщённый опыт)
+### hypothesis — формальная, проверяемая
 
 ```json
 {
-  "id": "exp00001",
-  "type": "experience",
-  "content": "На Верхней Волге в июне щука хорошо берёт на блесну утром.",
-  "source_document": {"type": "forum_thread", "title": "Щука на Верхней Волге"},
-  "source_reliability": 0.6,
-  "id_prefix": "exp"
+  "id": "hyp00001",
+  "type": "hypothesis",
+  "schema_version": "1.3",
+  "based_on": ["obs00001", "obs00002"],
+  "claim": "Повышение температуры воды выше 20°C снижает активность судака",
+  "direction": "decrease",
+  "formal_rule": {
+    "variable": "water_temp",
+    "operator": ">",
+    "value": 20
+  },
+  "hypothesis_text": "Если температура воды >20°C, судак перестаёт активно кормиться.",
+  "confidence": 0.6,
+  "id_prefix": "hyp"
 }
 ```
 
-### analysis — рассуждение на основе observation
+### evidence_synthesis — свидетельства с весами
 
-Analysis **не копирует** данные из observation, а ссылается на них через `based_on`.
+```json
+{
+  "id": "evs00001",
+  "type": "evidence_synthesis",
+  "schema_version": "1.3",
+  "based_on": ["hyp00001"],
+  "question": "Как температура воды влияет на активность судака?",
+  "evidence": [
+    {"id": "obs00001", "role": "supports", "weight": 0.8, "note": "Улов при 18°C"},
+    {"id": "obs00002", "role": "supports", "weight": 0.6, "note": "Нет улова при 20°C"},
+    {"id": "obs00004", "role": "supports", "weight": 0.7, "note": "Улов при 16°C"},
+    {"id": "obs00005", "role": "contradicts", "weight": 0.4, "note": "Улов при 22°C, глуб.8м"},
+    {"id": "fac00001", "role": "background", "weight": 0.9, "note": "Судак предпочитает 4-8м"}
+  ],
+  "summary": "9 из 12 наблюдений подтверждают. 3 contradict — все на глубине >7м.",
+  "id_prefix": "evs"
+}
+```
+
+### analysis
 
 ```json
 {
   "id": "ana00001",
   "type": "analysis",
-  "based_on": ["obs00001", "obs00002", "obs00003"],
-  "analysis": "1. Судак предпочитает глубокие ямы с каменистым дном — условие выполнено во всех 3 наблюдениях.\n2. При 18°C улов стабильный, при 22°C — пусто.\n3. Давление стабильное — коррелирует с уловом.\n4. Делаю вывод: оптимальная температура до 20°C.",
-  "recommendation": "Ловить судака при t воды до 20°C, джиг 12-15г, глубина 5-6м.",
-  "source_reliability": 0.7,
-  "analysis_confidence": 0.8,
+  "schema_version": "1.3",
+  "based_on": ["evs00001", "fac00001"],
+  "status": "supported",
+  "analysis": "1. Гипотеза: water_temp > 20 → catch_rate снижается.\n2. Evidence: 9 supports, 3 contradicts (глубина >7м).\n3. Вывод: подтверждено для глубин до 7м.",
+  "analysis_confidence": 0.85,
+  "evidence_strength": "средняя",
+  "alternative_explanations": [
+    "освещённость (солнце в зените)",
+    "активность кормовой базы (вылет насекомых)",
+    "давление (снижалось к обеду)"
+  ],
+  "causal_links": [
+    {
+      "factor": "water_temp",
+      "effect": "catch_rate",
+      "relation": "negative",
+      "confidence": 0.85,
+      "confounders": ["depth", "wind"]
+    }
+  ],
   "id_prefix": "ana"
 }
 ```
 
-### insufficient_data — запрос уточнения / признание незнания
+Отклонённая гипотеза (rejected, ≥30% от всех analysis):
 
-Отдельный тип для случаев, когда модель должна сказать «не знаю»:
+```json
+{
+  "id": "ana00002",
+  "type": "analysis",
+  "schema_version": "1.3",
+  "status": "rejected",
+  "analysis": "Гипотеза 'moon_phase → catch_rate' не подтверждена. 8 наблюдений: полнолуние 4 улова, новолуние 4 улова. Разница в пределах шума.",
+  "analysis_confidence": 0.95,
+  "evidence_strength": "средняя",
+  "alternative_explanations": [],
+  "causal_links": [],
+  "id_prefix": "ana"
+}
+```
+
+### recommendation
+
+`based_on` включает и analysis, и evidence_synthesis.
+
+```json
+{
+  "id": "rec00001",
+  "type": "recommendation",
+  "schema_version": "1.3",
+  "based_on": ["ana00001", "evs00001"],
+  "analysis_version": "1.0",
+  "target_species": "судак",
+  "recommended_depth": [4, 7],
+  "recommended_tackle": "джиг",
+  "recommended_lure": "12-15г",
+  "best_time": "утро",
+  "conditions": {
+    "water_temp_max": 20,
+    "bottom_type": "каменистое",
+    "current": "слабое"
+  },
+  "text": "На Верхней Волге в июне судак стабильно берёт утром на джиг 12-15г на глубине 4-7м с каменистым дном при t воды до 20°C.",
+  "actions": [
+    {"type": "change_depth", "value": [4, 7]},
+    {"type": "change_lure", "value": "джиг 12-15г"},
+    {"type": "change_time", "value": "утро"}
+  ],
+  "id_prefix": "rec"
+}
+```
+
+**Allowed actions (DSL contract):**
+
+| type | value |
+|------|-------|
+| `change_depth` | `[min, max]` |
+| `change_lure` | строка |
+| `change_tackle` | строка |
+| `change_time` | строка |
+| `move_spot` | строка (spot_id или описание) |
+| `change_bait` | строка |
+
+`text` обязателен для человека, `actions` — для машины. Оба слоя всегда присутствуют и не противоречат друг другу.
+
+### outcome
+
+Всегда содержит `execution_match` и `failure_reason`.
+
+```json
+{
+  "id": "out00001",
+  "type": "outcome",
+  "schema_version": "1.3",
+  "based_on": ["rec00001", "obs00010"],
+  "execution_match": 0.9,
+  "failure_reason": "none",
+  "conditions_note": "Глубина 5м вместо 6м, остальное совпало",
+  "result": {
+    "success": true,
+    "catch": [{"fish": "судак", "count": 4, "weight_kg": 12.5}],
+    "notes": "Рекомендация сработала"
+  },
+  "confidence": 0.9,
+  "id_prefix": "out"
+}
+```
+
+Неуспех из-за несоответствия условий:
+
+```json
+{
+  "id": "out00002",
+  "type": "outcome",
+  "schema_version": "1.3",
+  "based_on": ["rec00001", "obs00011"],
+  "execution_match": 0.3,
+  "failure_reason": "conditions_not_met",
+  "conditions_note": "t воды 23°C, илистое дно",
+  "result": {
+    "success": false,
+    "catch": [],
+    "notes": "Условия не соответствуют рекомендации"
+  },
+  "confidence": 0.7,
+  "id_prefix": "out"
+}
+```
+
+### relation — граф отношений
+
+Дополняет `based_on`. Позволяет строить typed-граф.
+
+```json
+{
+  "id": "rel00001",
+  "type": "relation",
+  "schema_version": "1.3",
+  "from": "obs00001",
+  "to": "hyp00001",
+  "relation": "supports",
+  "weight": 0.8,
+  "id_prefix": "rel"
+}
+```
+
+```json
+{
+  "id": "rel00002",
+  "type": "relation",
+  "schema_version": "1.3",
+  "from": "ana00001",
+  "to": "rec00001",
+  "relation": "derived_from",
+  "weight": 1.0,
+  "id_prefix": "rel"
+}
+```
+
+### fact
+
+```json
+{
+  "id": "fac00001",
+  "type": "fact",
+  "schema_version": "1.3",
+  "content": "Судак на Селигере предпочитает глубины 4-8 м с каменистым дном.",
+  "source_reliability": 0.9,
+  "source_document": {"type": "scientific_article", "title": "Ихтиология Верхней Волги"},
+  "id_prefix": "fac"
+}
+```
+
+### experience
+
+```json
+{
+  "id": "exp00001",
+  "type": "experience",
+  "schema_version": "1.3",
+  "content": "На Верхней Волге в июне щука хорошо берёт на блесну утром.",
+  "source_reliability": 0.6,
+  "id_prefix": "exp"
+}
+```
+
+### insufficient_data
 
 ```json
 {
   "id": "ins00001",
   "type": "insufficient_data",
-  "based_on": [],
+  "schema_version": "1.3",
   "query": "Где ловить рыбу?",
-  "analysis": "Вопрос слишком общий. Нет указания на водоём, сезон или целевую рыбу.",
-  "recommendation": "Недостаточно данных для рекомендации. Уточните, пожалуйста, на каком водоёме и какую рыбу планируете ловить.",
+  "analysis": "Вопрос слишком общий.",
+  "status": "insufficient_data",
+  "recommendation": {"text": "Уточните водоём, сезон и целевую рыбу."},
   "id_prefix": "ins"
 }
 ```
 
-### uncertainty — противоречие в данных
+### uncertainty
 
 ```json
 {
   "id": "unc00001",
   "type": "uncertainty",
+  "schema_version": "1.3",
   "based_on": ["obs00010", "obs00011"],
-  "analysis": "Наблюдения противоречивы: на червя поймали 3 кг леща, на кукурузу — 0. Через неделю на том же месте — наоборот.\nПричина неясна, данных для вывода недостаточно.",
-  "recommendation": "Точной рекомендации дать не могу. Обе наживки стоит попробовать. Если расскажете подробнее об условиях — смогу уточнить.",
-  "source_reliability": 0.6,
+  "analysis": "На червя 3кг, на кукурузу 0. Через неделю — наоборот.",
+  "status": "contradictory",
+  "causal_links": [],
+  "recommendation": {"text": "Попробуйте обе наживки."},
   "analysis_confidence": 0.2,
+  "evidence_strength": "низкая",
   "id_prefix": "unc"
 }
 ```
 
-### dialogue — диалог (ChatML)
-
-Диалоги строятся на основе существующих analysis/observation.
+### dialogue
 
 ```json
 {
   "id": "dia00001",
   "type": "dialogue",
-  "based_on": ["ana00001", "obs00001", "obs00002"],
+  "schema_version": "1.3",
+  "based_on": ["rec00001"],
+  "assistant_confidence": 0.7,
   "messages": [
-    {"role": "user", "content": "Планирую на Селигер в июне за судаком. Что посоветуешь?"},
-    {"role": "assistant", "content": "Отличный выбор! Какими снастями располагаете и с лодки или с берега планируете ловить?"},
-    {"role": "user", "content": "С лодки, спиннинг, джиг."},
-    {"role": "assistant", "content": "Рекомендую участки у островов, глубины 4-8 м, джиг 12-15 г. Лучшее время — утро или закат. По данным с этого сезона, оптимальная температура воды до 20°C."}
+    {"role": "user", "content": "Планирую на Селигер в июне за судаком."},
+    {"role": "assistant", "content": "Рекомендую глубины 4-8 м, джиг 12-15 г, утро, t воды до 20°C."}
   ],
   "id_prefix": "dia"
 }
 ```
 
-### Сводная таблица типов
+## 11. Целевая структура
 
-| Тип | Обязательные поля | Содержит данные | Ссылается на |
-|-----|------------------|----------------|-------------|
-| observation | id, water_body, season, result | Факторы, результат | source_document |
-| fact | id, content | Утверждение | source_document |
-| experience | id, content | Обобщение | source_document |
-| analysis | id, based_on, analysis, recommendation | Рассуждение | observation |
-| insufficient_data | id, query, analysis | Признание незнания | — |
-| uncertainty | id, based_on, analysis | Противоречие | observation |
-| dialogue | id, messages | Разговор | analysis, observation |
-
-## 10. Evidence — формат факторов
-
-Все факторы (water_body, season, fish, water_temp, depth, etc.) хранятся как плоский словарь, а не список пар:
-
-```json
-{
-  "water_body": "Верхняя Волга",
-  "season": "июнь",
-  "fish": "судак",
-  "water_temp": 18,
-  "depth": 5,
-  "bottom": "каменистое",
-  "current": "слабое",
-  "pressure": "стабильное"
-}
-```
-
-Это позволяет в коде обращаться `record["water_temp"]` вместо поиска по списку.
-
-## 11. Reasoning не привязан к вопросу
-
-Модель учится рассуждать **от данных к выводу**, а не от вопроса к ответу:
-
-❌ **Вопрос-ответ:** «Где ловить судака?» → «На глубине 4-8 м». Просто запомненный паттерн.
-
-✅ **Рассуждение от данных:** Даны observation [X, Y, Z] → анализ условий → вывод → рекомендация.
-
-## 12. Диалоги
-
-Минимум 3-5 обменов — нижняя граница. Реальные диалоги — 10-20+ реплик на основе анализа и наблюдений.
-
-## 13. Целевая структура по типам (ориентир)
-
-| Тип | Доля | Назначение |
+| Тип | Доля | Примечание |
 |-----|------|-----------|
-| analysis | ~40% | Рассуждение — ядро обучения |
-| observation | ~15% | Сырые наблюдения, первичные данные |
-| insufficient_data | ~5% | Признание незнания |
-| uncertainty | ~5% | Противоречия |
-| dialogue | ~20% | Диалоги |
-| fact | ~10% | Факты |
-| experience | ~5% | Эмпирика |
+| analysis | ~18% | ≥30% rejected |
+| evidence_synthesis | ~8% | — |
+| hypothesis | ~8% | formal_rule обязателен |
+| observation | ~15% | факты, без success |
+| session | ~5% | — |
+| environment | ~5% | source обязателен |
+| raw_observation | ~3% | — |
+| recommendation | ~5% | text + actions |
+| outcome | ~5% | execution_match + failure_reason |
+| relation | ~5% | граф |
+| dialogue | ~12% | — |
+| insufficient_data | ~5% | — |
+| uncertainty | ~5% | — |
+| fact | ~4% | — |
+| experience | ~2% | — |
 
-## 14. Фильтрация и очистка
-
-1. **Unicode нормализация** — NFC
-2. **Удаление HTML/разметки**
-3. **Фильтрация токсичности** — удалить оскорбления и перепалки. Нейтральные цитаты с отдельными грубыми словами не удалять
-4. **Дедупликация** — exact match (первая итерация), MinHash — при масштабировании
-5. **Удаление слишком коротких записей** — < 100 символов (кроме диалогов)
-6. **Lang-filter** — только русский язык
-
-## 15. Corpus validation (автоматическая проверка корпуса)
-
-Перед обучением каждая запись проходит валидацию:
-
-- ✅ JSON schema (поля, типы, обязательные)
-- ✅ UTF-8 encoding
-- ✅ NFC normalization
-- ✅ id уникален
-- ✅ type один из допустимых
-- ✅ based_on ссылается на существующие id
-- ✅ analysis не пустой (для типа analysis)
-- ✅ recommendation не пустой (для типов analysis, uncertainty, insufficient_data)
-- ✅ water_body и season указаны (для observation)
-- ✅ Все observation имеют result
-
-Валидатор — скрипт, который возвращает отчёт:
+## 12. Замкнутый цикл
 
 ```
-Validated 150 records:
-  ✅ 145 passed
-  ❌ 3 missing based_on targets
-  ❌ 2 empty analysis fields
+Session → Observation (факты + effort)
+    ↓
+Hypothesis (formal_rule)
+    ↓
+Evidence synthesis (evidence[].weight)
+    ↓
+Analysis (status + causal_links + alternative_explanations)
+    ↓
+Recommendation (actions[])
+    ↓
+Outcome (execution_match + failure_reason)
+    ↓
+Relation (граф) + новое наблюдение
 ```
 
-## 16. Структура на диске
+## 13. Фильтрация
+
+NFC, HTML, токсичность, дедупликация (exact → MinHash), <100 символов, lang=ru.
+
+## 14. Валидация
+
+- schema_version, UTF-8, NFC
+- id уникален, type допустим
+- based_on ссылается на существующие id
+- status ∈ {supported, rejected, partially_supported, insufficient_data, contradictory}
+- evidence[].role ∈ {supports, contradicts, background}
+- evidence[].weight ∈ [0,1]
+- formal_rule.variable, operator, value — обязательны для hypothesis
+- recommendation.text и actions[] — оба обязательны
+- outcome.execution_match ∈ [0,1], failure_reason — всегда
+- session.water_body_id обязателен
+- catch — массив
+- datetime ISO 8601
+- raw_observation неизменна (hash)
+
+## 15. Структура на диске
 
 ```
 data/
-  raw/
-    forums/
-    books/
-    articles/
-    reports/
-    interviews/
+  raw/           forums/ books/ articles/
+  water_bodies.json
+  dictionaries/
+    species.json  bait.json  tackle.json
+    bottom_types.json  weather_terms.json  failure_reasons.json
   processed/
+    raw_observations.jsonl
+    sessions.jsonl
+    environments.jsonl
     observations.jsonl
-    facts.jsonl
-    experiences.jsonl
+    hypotheses.jsonl
+    evidence_syntheses.jsonl
     analyses.jsonl
-    uncertainties.jsonl
-    insufficient_data.jsonl
+    recommendations.jsonl
+    outcomes.jsonl
+    relations.jsonl
+    facts.jsonl  experiences.jsonl
+    uncertainties.jsonl  insufficient_data.jsonl
     dialogues.jsonl
-  splits/
-    train.jsonl      # 80%
-    valid.jsonl      # 10%
-    test.jsonl       # 10%
+  splits/        train.jsonl  valid.jsonl  test.jsonl
+  benchmarks/
+    reasoning.jsonl  planning.jsonl  memory.jsonl  retrieval.jsonl
+    dialogue.jsonl  hallucination.jsonl  uncertainty.jsonl
+    causal_reasoning.jsonl
 ```
 
-## 17. Train/Validation/Test split
+## 16. Split
 
-Разбиение **по source_document**, а не случайно по строкам. Все записи из одного источника целиком попадают в один split.
+По source_document.
 
-## 18. Инструменты
+## 17. Первая итерация
 
-| Задача | Инструмент |
-|--------|-----------|
-| Очистка HTML | BeautifulSoup / selectolax |
-| Детекция языка | langdetect / fastText |
-| Дедупликация (первая итерация) | exact match |
-| Дедупликация (масштабирование) | datasketch (MinHash) |
-| Фильтрация токсичности | регулярки + список стоп-слов |
-| Валидация корпуса | JSON schema + кастомный скрипт |
-| Хранение | JSONL |
-
-## 19. Первая итерация
-
-1. Собрать 1-2 источника (один пост форума, одну статью)
-2. Очистить → получить 0.5-1 МБ
-3. Вручную подготовить 10-20 observation (включая отрицательные — с пустым уловом)
-4. Вручную подготовить 5-10 analysis на основе этих observation
-5. Вручную подготовить 2-3 insufficient_data (незнание)
-6. Вручную подготовить 5 коротких диалогов (3-6 реплик)
-7. Запустить corpus validation
-8. Проверить пайплайн: валидация → токенизация → обучение пробной модели
-9. Оценить качество → итерация
-
-**На первой итерации качество важнее объёма.** 20 эталонных записей ценнее 200 автоматических с ошибками.
+1. 1 источник (1-2 поста форума)
+2. 3-5 raw → 2 session + 5-8 observation (min 1 без улова) + 2 environment
+3. 2 hypothesis (formal_rule) → 2 evidence_synthesis → 3 analysis (min 1 rejected)
+4. 1 recommendation (actions[]) → 2 outcome (1 success + 1 failure_reason)
+5. 1 insufficient_data + 2 relation + 2 dialogue
+6. Валидация → токенизация → обучение → оценка

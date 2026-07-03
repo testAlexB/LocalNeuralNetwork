@@ -1,0 +1,42 @@
+{
+  "gazetteer_version": "1.0",
+  "water_bodies": [
+    {
+      "water_body_id": "wb_seliger",
+      "water_body_name": "Селигер",
+      "type": "озеро",
+      "aliases": ["оз.Селигер", "озеро Селигер", "Селигерское озеро"],
+      "location": {"lat": 57.2, "lon": 33.1, "region": "Тверская область", "nearest_settlement": "Осташков"},
+      "spots": [
+        {"spot_id": "wbs_seliger_khachin", "name": "остров Хачин", "lat": 57.23, "lon": 33.15},
+        {"spot_id": "wbs_seliger_north", "name": "северная коса", "lat": 57.30, "lon": 33.08}
+      ]
+    },
+    {
+      "water_body_id": "wb_volga_upper",
+      "water_body_name": "Верхняя Волга",
+      "type": "река",
+      "aliases": ["Волга", "р.Волга", "Верхняя Волга, Тверская обл."],
+      "location": {"lat": 56.9, "lon": 35.9, "region": "Тверская область", "nearest_settlement": "Тверь"},
+      "spots": [
+        {"spot_id": "wbs_volga_khotino", "name": "Хотино", "lat": 56.85, "lon": 35.95}
+      ]
+    },
+    {
+      "water_body_id": "wb_tvertsa",
+      "water_body_name": "Тверца",
+      "type": "река",
+      "aliases": ["р.Тверца", "река Тверца"],
+      "location": {"lat": 57.0, "lon": 34.6, "region": "Тверская область", "nearest_settlement": "Тверь"},
+      "spots": []
+    },
+    {
+      "water_body_id": "wb_msta",
+      "water_body_name": "Мста",
+      "type": "река",
+      "aliases": ["р.Мста", "река Мста"],
+      "location": {"lat": 57.8, "lon": 34.5, "region": "Тверская область"},
+      "spots": []
+    }
+  ]
+}

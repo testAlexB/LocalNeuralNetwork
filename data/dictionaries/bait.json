@@ -1,0 +1,15 @@
+{
+  "dictionary_version": "1.0",
+  "baits": [
+    {"id": "bait_worm", "name": "червь", "aliases": ["земляной червь", "дождевик", "навозник"]},
+    {"id": "bait_maggot", "name": "опарыш", "aliases": []},
+    {"id": "bait_bloodworm", "name": "мотыль", "aliases": []},
+    {"id": "bait_corn", "name": "кукуруза", "aliases": ["консервированная кукуруза"]},
+    {"id": "bait_pea", "name": "горох", "aliases": []},
+    {"id": "bait_dough", "name": "тесто", "aliases": ["манка", "болтушка"]},
+    {"id": "bait_boilie", "name": "бойл", "aliases": []},
+    {"id": "bait_live_fish", "name": "живец", "aliases": ["живая рыбка", "малёк"]},
+    {"id": "bait_frog", "name": "лягушка", "aliases": []},
+    {"id": "bait_crawfish", "name": "рак", "aliases": ["шеечка рака"]}
+  ]
+}

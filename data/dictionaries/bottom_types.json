@@ -1,0 +1,11 @@
+{
+  "dictionary_version": "1.0",
+  "bottom_types": [
+    {"id": "bottom_rocky", "name": "каменистое", "aliases": ["камни", "галька", "каменное"]},
+    {"id": "bottom_sandy", "name": "песчаное", "aliases": ["песок"]},
+    {"id": "bottom_muddy", "name": "илистое", "aliases": ["ил", "грязь", "торфяное"]},
+    {"id": "bottom_clay", "name": "глинистое", "aliases": ["глина"]},
+    {"id": "bottom_shell", "name": "ракушечное", "aliases": ["ракушка", "ракушняк"]},
+    {"id": "bottom_mixed", "name": "смешанное", "aliases": ["камень+песок", "песок+ил"]}
+  ]
+}

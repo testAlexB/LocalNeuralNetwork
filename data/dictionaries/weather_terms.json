@@ -1,0 +1,24 @@
+{
+  "dictionary_version": "1.0",
+  "clouds": [
+    {"id": "sky_clear", "name": "ясно", "aliases": ["безоблачно", "солнечно", "ясное небо"]},
+    {"id": "sky_partly", "name": "переменная облачность", "aliases": ["облачно с прояснениями"]},
+    {"id": "sky_overcast", "name": "пасмурно", "aliases": ["облачно", "серо", "сплошная облачность"]}
+  ],
+  "precipitation": [
+    {"id": "precip_none", "name": "нет", "aliases": ["без осадков", "сухо"]},
+    {"id": "precip_drizzle", "name": "морось", "aliases": ["мелкий дождь", "изморось"]},
+    {"id": "precip_rain", "name": "дождь", "aliases": ["ливень", "дождик"]},
+    {"id": "precip_snow", "name": "снег", "aliases": ["снегопад"]}
+  ],
+  "wind_directions": [
+    {"id": "wind_n", "name": "С", "aliases": ["северный", "норд"]},
+    {"id": "wind_ne", "name": "СВ", "aliases": ["северо-восточный"]},
+    {"id": "wind_e", "name": "В", "aliases": ["восточный"]},
+    {"id": "wind_se", "name": "ЮВ", "aliases": ["юго-восточный"]},
+    {"id": "wind_s", "name": "Ю", "aliases": ["южный", "зюйд"]},
+    {"id": "wind_sw", "name": "ЮЗ", "aliases": ["юго-западный"]},
+    {"id": "wind_w", "name": "З", "aliases": ["западный"]},
+    {"id": "wind_nw", "name": "СЗ", "aliases": ["северо-западный"]}
+  ]
+}

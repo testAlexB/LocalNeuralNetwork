@@ -1,0 +1,12 @@
+{
+  "dictionary_version": "1.0",
+  "tackle": [
+    {"id": "tackle_spinning", "name": "спиннинг", "aliases": ["спиннинговая снасть"]},
+    {"id": "tackle_feedder", "name": "фидер", "aliases": ["донка", "фидерная снасть"]},
+    {"id": "tackle_float", "name": "поплавок", "aliases": ["поплавочная удочка"]},
+    {"id": "tackle_jig", "name": "джиг", "aliases": ["джиговая снасть", "джиг-спиннинг"]},
+    {"id": "tackle_trolling", "name": "троллинг", "aliases": ["дорожка"]},
+    {"id": "tackle_fly", "name": "нахлыст", "aliases": ["нахлыстовая снасть"]},
+    {"id": "tackle_bottom", "name": "донка", "aliases": ["закидушка", "донная снасть"]}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "dictionary_version": "1.0",
+  "species": [
+    {"id": "fish_pike_perch", "name": "судак", "aliases": ["клыкастый", "судачок", "судак обыкновенный"]},
+    {"id": "fish_pike", "name": "щука", "aliases": ["щука обыкновенная"]},
+    {"id": "fish_perch", "name": "окунь", "aliases": ["полосатик", "матросик"]},
+    {"id": "fish_bream", "name": "лещ", "aliases": ["лещ обыкновенный", "подлещик"]},
+    {"id": "fish_roach", "name": "плотва", "aliases": ["плотвичка", "тарань"]},
+    {"id": "fish_carp", "name": "сазан", "aliases": ["карп", "дикий карп"]},
+    {"id": "fish_crucian", "name": "карась", "aliases": ["карась золотой", "карась серебряный"]},
+    {"id": "fish_asp", "name": "жерех", "aliases": ["шереспер"]},
+    {"id": "fish_ide", "name": "язь", "aliases": []},
+    {"id": "fish_chub", "name": "голавль", "aliases": ["голавль обыкновенный"]},
+    {"id": "fish_catfish", "name": "сом", "aliases": ["сом обыкновенный", "сом европейский"]},
+    {"id": "fish_burbot", "name": "налим", "aliases": ["мень"]},
+    {"id": "fish_zander", "name": "берш", "aliases": ["судак волжский"]},
+    {"id": "fish_rudd", "name": "краснопёрка", "aliases": ["краснопёрка обыкновенная"]},
+    {"id": "fish_tench", "name": "линь", "aliases": []},
+    {"id": "fish_sterlet", "name": "стерлядь", "aliases": []}
+  ]
+}
