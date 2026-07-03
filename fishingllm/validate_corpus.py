@@ -1,5 +1,6 @@
 import json
 import unicodedata
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,11 @@ VALID_FAILURE_REASONS = frozenset({
 
 VALID_OPERATORS = frozenset({">", "<", ">=", "<=", "==", "!=", "in", "between"})
 
+VALID_CAUSAL_RELATIONS = frozenset({"positive", "negative", "nonlinear"})
+
 ACCEPTED_SCHEMA_VERSION = "1.3"
+
+ISO8601_REQUIRED_KEYS = frozenset({"datetime", "datetime_start", "datetime_end"})
 
 
 class CorpusError(Exception):
@@ -63,6 +68,26 @@ def check_nfc(text: str, path: str, line: int):
         raise CorpusError(f"{path}:{line}: text is not NFC-normalized")
 
 
+def check_datetime(value: str, rid: str, field: str):
+    if not isinstance(value, str) or not value.strip():
+        raise CorpusError(f"{rid}: {field} must be a non-empty ISO8601 string")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise CorpusError(f"{rid}: {field} '{value}' is not valid ISO8601")
+
+
+ALLOWED_BASED_ON: dict[str, frozenset] = {
+    "analysis": frozenset({"evidence_synthesis", "fact", "experience", "observation", "hypothesis"}),
+    "evidence_synthesis": frozenset({"hypothesis", "observation", "fact", "experience"}),
+    "hypothesis": frozenset({"observation", "fact", "experience"}),
+    "recommendation": frozenset({"analysis", "evidence_synthesis", "fact", "experience"}),
+    "outcome": frozenset({"recommendation", "observation", "session"}),
+    "dialogue": frozenset({"recommendation", "analysis", "evidence_synthesis"}),
+    "uncertainty": frozenset({"observation", "analysis", "evidence_synthesis"}),
+}
+
+
 def validate_corpus(data_dir: str | Path) -> list[str]:
     data_dir = Path(data_dir)
     errors: list[str] = []
@@ -87,23 +112,19 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
 
             rtype = rec.get("type", "unknown")
 
-            # schema_version
             sv = rec.get("schema_version")
             if sv is None:
                 errors.append(f"{rid}: missing schema_version")
             elif sv != ACCEPTED_SCHEMA_VERSION:
                 errors.append(f"{rid}: schema_version '{sv}' != '{ACCEPTED_SCHEMA_VERSION}'")
 
-            # id_prefix consistency
             prefix = rec.get("id_prefix", "")
             if prefix and not rid.startswith(prefix):
                 errors.append(f"{rid}: id does not start with id_prefix '{prefix}'")
 
-            # type validity
             if rtype not in VALID_TYPES:
                 errors.append(f"{rid}: invalid type '{rtype}'")
 
-            # raw_observation immutability (hash on first pass)
             if rtype == "raw_observation":
                 text = rec.get("text", "")
                 h = sha256(text.encode("utf-8")).hexdigest()
@@ -113,19 +134,31 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
                 else:
                     raw_hashes[rid] = h
 
-            # type-specific validation
             try:
-                _validate_record(rec, fname, rid)
+                _validate_record(rec, fname, rid, all_records)
             except CorpusError as e:
                 errors.append(str(e))
 
-    # Second pass: based_on references
+    # based_on references and type consistency
     for rid, rec in all_records.items():
         based_on = rec.get("based_on", [])
         if isinstance(based_on, list):
             for ref in based_on:
                 if ref not in all_records:
                     errors.append(f"{rid}: based_on references non-existent '{ref}'")
+
+    rtype = rec.get("type")
+    allowed_types = ALLOWED_BASED_ON.get(rtype)
+    if allowed_types is not None:
+        for ref in based_on:
+            ref_rec = all_records.get(ref)
+            if ref_rec:
+                ref_type = ref_rec.get("type")
+                if ref_type not in allowed_types:
+                    errors.append(
+                        f"{rid}: based_on '{ref}' has type '{ref_type}' "
+                        f"not allowed for {rtype} (allowed: {sorted(allowed_types)})"
+                    )
 
     # D8: all IDs (except raw and relation) must be in relation graph
     relation_targets = set()
@@ -165,8 +198,13 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
     return errors
 
 
-def _validate_record(rec: dict, fname: str = "", rid: str = ""):
+def _validate_record(rec: dict, fname: str = "", rid: str = "", all_records: dict | None = None):
     rtype = rec.get("type")
+
+    # ISO8601 validation for datetime fields
+    for key in ISO8601_REQUIRED_KEYS:
+        if key in rec:
+            check_datetime(rec[key], rid, key)
 
     if rtype == "raw_observation":
         if not isinstance(rec.get("text"), str) or not rec["text"].strip():
@@ -176,8 +214,10 @@ def _validate_record(rec: dict, fname: str = "", rid: str = ""):
     elif rtype == "session":
         if not rec.get("water_body_id"):
             raise CorpusError(f"{rid}: session.water_body_id is required")
-        if not rec.get("datetime_start") or not rec.get("datetime_end"):
-            raise CorpusError(f"{rid}: session requires datetime_start and datetime_end")
+        for key in ("datetime_start", "datetime_end"):
+            val = rec.get(key)
+            if val:
+                check_datetime(val, rid, key)
 
     elif rtype == "observation":
         if "success" in rec:
@@ -194,6 +234,9 @@ def _validate_record(rec: dict, fname: str = "", rid: str = ""):
         mf = rec.get("missing_factors", [])
         if not isinstance(mf, list):
             raise CorpusError(f"{rid}: missing_factors must be an array")
+        oq = rec.get("observation_quality")
+        if oq is not None and (not isinstance(oq, (int, float)) or not (0 <= oq <= 1)):
+            raise CorpusError(f"{rid}: observation_quality must be 0..1")
 
     elif rtype == "hypothesis":
         fr = rec.get("formal_rule")
@@ -224,9 +267,21 @@ def _validate_record(rec: dict, fname: str = "", rid: str = ""):
         status = rec.get("status")
         if status not in VALID_STATUSES:
             raise CorpusError(f"{rid}: analysis.status '{status}' invalid")
+        ac = rec.get("analysis_confidence")
+        if ac is not None and (not isinstance(ac, (int, float)) or not (0 <= ac <= 1)):
+            raise CorpusError(f"{rid}: analysis_confidence must be 0..1")
         for cl in rec.get("causal_links", []):
             if not cl.get("factor") or not cl.get("effect"):
                 raise CorpusError(f"{rid}: causal_link requires factor and effect")
+            rel = cl.get("relation")
+            if rel and rel not in VALID_CAUSAL_RELATIONS:
+                raise CorpusError(f"{rid}: causal_link.relation '{rel}' not in {sorted(VALID_CAUSAL_RELATIONS)}")
+            conf = cl.get("confidence")
+            if conf is not None and (not isinstance(conf, (int, float)) or not (0 <= conf <= 1)):
+                raise CorpusError(f"{rid}: causal_link.confidence must be 0..1")
+            confounders = cl.get("confounders")
+            if confounders is not None and not isinstance(confounders, list):
+                raise CorpusError(f"{rid}: causal_link.confounders must be an array")
 
     elif rtype == "recommendation":
         if not rec.get("text"):
@@ -237,6 +292,8 @@ def _validate_record(rec: dict, fname: str = "", rid: str = ""):
         for i, a in enumerate(actions):
             if a.get("type") not in VALID_ACTION_TYPES:
                 raise CorpusError(f"{rid}: actions[{i}].type '{a.get('type')}' not in allowed DSL")
+            if "value" not in a:
+                raise CorpusError(f"{rid}: actions[{i}] is missing 'value'")
 
     elif rtype == "outcome":
         em = rec.get("execution_match")
