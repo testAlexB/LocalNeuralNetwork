@@ -6,8 +6,9 @@ from pathlib import Path
 class FishingTokenizer:
     """BPE-токенизатор для FishingLLM (byte-level, NFC нормализация)."""
 
-    def __init__(self, vocab_size: int = 16_000):
+    def __init__(self, vocab_size: int = 16_000, min_frequency: int = 2):
         self.vocab_size = vocab_size
+        self.min_frequency = min_frequency
         self.special_tokens = [
             "<unk>",
             "<s>",
@@ -22,7 +23,7 @@ class FishingTokenizer:
         self._tokenizer.train(
             files=files,
             vocab_size=self.vocab_size,
-            min_frequency=2,
+            min_frequency=self.min_frequency,
             special_tokens=self.special_tokens,
         )
         self._tokenizer._tokenizer.normalizer = NFC()
