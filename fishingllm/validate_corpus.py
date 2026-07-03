@@ -749,7 +749,7 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
                 errors.append(f"{jsonl_path.name}: record missing 'id'")
                 continue
             if rid in all_records:
-                errors.append(f"duplicate id '{rid}' in {jsonl_path.name}")
+                errors.append(err(E_DUPLICATE, rid, f"duplicate in {jsonl_path.name}"))
             all_records[rid] = rec
 
     # Phase 2: validate each record with full cross-reference context
