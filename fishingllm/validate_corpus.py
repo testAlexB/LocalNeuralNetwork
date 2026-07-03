@@ -1,5 +1,6 @@
 import json
 import unicodedata
+import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from hashlib import sha256
@@ -31,6 +32,12 @@ E_MISSING_FACTORS = "E_MISSING_FACTORS"
 E_DUPLICATE = "E_DUPLICATE"
 E_GRAPH = "E_GRAPH"
 E_CYCLE = "E_CYCLE"
+E_OUTCOME = "E_OUTCOME"
+E_HYPOTHESIS = "E_HYPOTHESIS"
+E_DICTIONARY = "E_DICTIONARY"
+E_ENVIRONMENT = "E_ENVIRONMENT"
+E_GRAPH_BASED_ON = "E_GRAPH_BASED_ON"
+E_GRAPH_CONNECTIVITY = "E_GRAPH_CONNECTIVITY"
 
 
 class CorpusError(Exception):
@@ -79,6 +86,7 @@ VALID_FAILURE_REASONS = frozenset({
     "equipment_difference", "low_activity", "unknown",
 })
 VALID_OPERATORS = frozenset({">", "<", ">=", "<=", "==", "!=", "in", "between"})
+VALID_TIME_OF_DAY = frozenset({"утро", "день", "вечер", "ночь"})
 ACCEPTED_SCHEMA_VERSION = "1.3"
 ISO8601_KEYS = frozenset({"datetime", "datetime_start", "datetime_end"})
 
@@ -110,8 +118,8 @@ CATCH_ITEM_SCHEMA = {
 REQUIRED_FIELDS: dict[str, list[str]] = {
     "raw_observation": ["text"],
     "session": ["water_body_id", "datetime_start", "datetime_end"],
-    "observation": ["conditions", "effort", "result"],
-    "hypothesis": ["formal_rule", "claim", "confidence"],
+    "observation": ["conditions", "effort", "result", "environment_id", "time_of_day", "datetime"],
+    "environment": ["session_id", "datetime", "water_temp", "pressure_hpa", "wind_speed", "moon_phase", "precipitation", "water_clarity", "water_level"],
     "evidence_synthesis": ["evidence", "summary"],
     "analysis": ["status", "analysis", "analysis_confidence", "evidence_strength", "causal_links"],
     "recommendation": ["text", "actions", "target_species"],
@@ -440,18 +448,30 @@ class CausalLinkRule(ApplyToTypes):
     def _check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
         rid = rec.get("id", "?")
         errors: list[str] = []
+        seen_pairs: set[tuple[str, str]] = set()
         for cl in rec.get("causal_links", []):
             if not isinstance(cl, dict):
                 errors.append(err(E_CAUSAL_LINK, rid, "causal_link must be an object"))
                 continue
             factor = cl.get("factor")
             effect = cl.get("effect")
-            if not factor or not isinstance(factor, str):
+            f_ok = bool(factor) and isinstance(factor, str)
+            e_ok = bool(effect) and isinstance(effect, str)
+            if not f_ok:
                 errors.append(err(E_CAUSAL_LINK, rid,
                                   "causal_link.factor is required non-empty string"))
-            if not effect or not isinstance(effect, str):
+            if not e_ok:
                 errors.append(err(E_CAUSAL_LINK, rid,
                                   "causal_link.effect is required non-empty string"))
+            if f_ok and e_ok:
+                pair = (factor, effect)
+                if pair in seen_pairs:
+                    errors.append(err(E_CAUSAL_LINK, rid,
+                                      f"duplicate causal_link ({factor} → {effect})"))
+                seen_pairs.add(pair)
+                if factor == effect:
+                    errors.append(err(E_CAUSAL_LINK, rid,
+                                      f"causal_link factor and effect are identical ('{factor}')"))
             rel = cl.get("relation")
             if rel is not None and rel not in VALID_CAUSAL_RELATIONS:
                 errors.append(err(E_CAUSAL_LINK, rid,
@@ -648,6 +668,249 @@ class MissingFactorsRule(ApplyToTypes):
         return []
 
 
+class OutcomeConsistencyRule(ApplyToTypes):
+    def __init__(self):
+        super().__init__("outcome_consistency", {"outcome"})
+
+    def _check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        rid = rec.get("id", "?")
+        errors: list[str] = []
+        result = rec.get("result", {})
+        catch = result.get("catch", []) if isinstance(result, dict) else []
+        success = result.get("success") if isinstance(result, dict) else None
+        if isinstance(catch, list) and len(catch) == 0:
+            if success is True:
+                errors.append(err(E_OUTCOME, rid,
+                                  "catch is empty but success=True"))
+        if isinstance(catch, list) and len(catch) > 0:
+            if success is False:
+                errors.append(err(E_OUTCOME, rid,
+                                  "catch non-empty but success=False"))
+        for i, item in enumerate(catch):
+            if isinstance(item, dict) and item.get("count", 0) > 0:
+                if success is False:
+                    errors.append(err(E_OUTCOME, rid,
+                                      f"catch[{i}].count>0 but success=False"))
+        return errors
+
+
+class HypothesisFormalRule(ApplyToTypes):
+    def __init__(self):
+        super().__init__("hypothesis_formal_rule", {"hypothesis"})
+
+    def _check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        rid = rec.get("id", "?")
+        errors: list[str] = []
+        fr = rec.get("formal_rule", {})
+        if not isinstance(fr, dict):
+            return [err(E_HYPOTHESIS, rid, "formal_rule must be an object")]
+        var = fr.get("variable")
+        if not var or not isinstance(var, str):
+            errors.append(err(E_HYPOTHESIS, rid,
+                              "formal_rule.variable is required non-empty string"))
+        val = fr.get("value")
+        op = fr.get("operator")
+        if not op or not isinstance(op, str):
+            errors.append(err(E_HYPOTHESIS, rid,
+                              "formal_rule.operator is required"))
+        elif op not in VALID_OPERATORS:
+            errors.append(err(E_HYPOTHESIS, rid,
+                              f"formal_rule.operator '{op}' not in {sorted(VALID_OPERATORS)}"))
+            op = ""
+        else:
+            if op in (">", "<", ">=", "<=", "==", "!="):
+                if val is not None and not isinstance(val, (int, float)):
+                    errors.append(err(E_HYPOTHESIS, rid,
+                                      f"formal_rule.value must be numeric for operator '{op}'"))
+            if op == "in" and not isinstance(val, list):
+                errors.append(err(E_HYPOTHESIS, rid,
+                                  "formal_rule.value must be a list for operator 'in'"))
+            if op == "between" and (not isinstance(val, list) or len(val) != 2):
+                errors.append(err(E_HYPOTHESIS, rid,
+                                  "formal_rule.value must be [lo, hi] for operator 'between'"))
+        return errors
+
+
+class DictionaryRule(ApplyToTypes):
+    def __init__(self, dict_path: Path | None = None):
+        super().__init__("dictionary", {"observation", "recommendation"})
+        if dict_path is None:
+            script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+            dict_path = script_dir.parent / "data" / "dictionaries"
+        self._dict_path = dict_path
+        self._loaded: bool = False
+        self._species: set[str] = set()
+        self._baits: set[str] = set()
+
+    def reset(self) -> None:
+        self._loaded = False
+        self._species.clear()
+        self._baits.clear()
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        species_path = self._dict_path / "species.json"
+        bait_path = self._dict_path / "bait.json"
+        if species_path.exists():
+            with open(species_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for entry in data if isinstance(data, list) else data.get("species", []):
+                    name = entry.get("name") if isinstance(entry, dict) else entry
+                    if isinstance(name, str):
+                        self._species.add(name)
+        if bait_path.exists():
+            with open(bait_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for entry in data if isinstance(data, list) else data.get("bait", []):
+                    name = entry.get("name") if isinstance(entry, dict) else entry
+                    if isinstance(name, str):
+                        self._baits.add(name)
+
+    def _check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        self._ensure_loaded()
+        if not self._species and not self._baits:
+            return []
+        rid = rec.get("id", "?")
+        errors: list[str] = []
+
+        if rec.get("type") == "observation":
+            result = rec.get("result", {})
+            raw_catch = result.get("catch") if isinstance(result, dict) else []
+            if not isinstance(raw_catch, list):
+                return errors
+            for i, item in enumerate(raw_catch):
+                if not isinstance(item, dict):
+                    continue
+                fish = item.get("fish")
+                if fish and self._species and fish not in self._species:
+                    errors.append(err(E_DICTIONARY, rid,
+                                      f"catch[{i}].fish '{fish}' not in species dictionary"))
+
+        if rec.get("type") == "recommendation":
+            for a in rec.get("actions", []):
+                if not isinstance(a, dict):
+                    continue
+                if a.get("type") == "change_bait":
+                    val = a.get("value")
+                    if isinstance(val, str) and self._baits and val not in self._baits:
+                        errors.append(err(E_DICTIONARY, rid,
+                                          f"action value '{val}' not in bait dictionary"))
+        return errors
+
+
+class EnvironmentRefRule(Rule):
+    def __init__(self):
+        super().__init__("environment_ref", "environment_id must reference a valid environment record")
+
+    def check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        return []
+
+    def check_global(self, all_records: dict[str, dict]) -> list[str]:
+        errors: list[str] = []
+        for rid, rec in all_records.items():
+            if rec.get("type") != "observation":
+                continue
+            env_id = rec.get("environment_id")
+            if not env_id:
+                continue
+            env_rec = all_records.get(env_id)
+            if env_rec is None:
+                errors.append(err(E_ENVIRONMENT, rid,
+                                  f"environment_id '{env_id}' does not exist in corpus"))
+            elif env_rec.get("type") != "environment":
+                errors.append(err(E_ENVIRONMENT, rid,
+                                  f"environment_id '{env_id}' has type '{env_rec.get('type')}' not 'environment'"))
+        return errors
+
+
+class EvidenceRefTypeRule(ApplyToTypes):
+    def __init__(self):
+        super().__init__("evidence_ref_type", {"evidence_synthesis"})
+
+    def _check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        rid = rec.get("id", "?")
+        errors: list[str] = []
+        for i, e in enumerate(rec.get("evidence", [])):
+            ref_id = e.get("id")
+            if ref_id and ref_id in all_records:
+                ref_type = all_records[ref_id].get("type")
+                if ref_type not in ("hypothesis", "observation", "fact", "experience"):
+                    errors.append(err(E_EVIDENCE, rid,
+                                      f"evidence[{i}].id '{ref_id}' has type '{ref_type}' "
+                                      f"which is not a valid evidence source"))
+        return errors
+
+
+class GraphBasedOnConsistencyRule(Rule):
+    def __init__(self):
+        super().__init__("graph_based_on", "based_on edges must have matching relation entries")
+
+    def check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        return []
+
+    def check_global(self, all_records: dict[str, dict]) -> list[str]:
+        errors: list[str] = []
+        has_relations = any(r.get("type") == "relation" for r in all_records.values())
+        if not has_relations:
+            return errors
+        relation_pairs: set[tuple[str, str]] = set()
+        nodes_with_edges: set[str] = set()
+        for rec in all_records.values():
+            if rec.get("type") == "relation":
+                f = rec.get("from")
+                t = rec.get("to")
+                if f and t:
+                    relation_pairs.add((f, t))
+                    relation_pairs.add((t, f))
+                    nodes_with_edges.add(f)
+                    nodes_with_edges.add(t)
+        for rid, rec in all_records.items():
+            rtype = rec.get("type")
+            if rtype in ("raw_observation", "relation"):
+                continue
+            if rid not in nodes_with_edges:
+                continue
+            based_on = rec.get("based_on", [])
+            if not isinstance(based_on, list):
+                continue
+            for ref in based_on:
+                if ref not in all_records:
+                    continue
+                if (rid, ref) not in relation_pairs:
+                    errors.append(err(E_GRAPH_BASED_ON, rid,
+                                      f"based_on references '{ref}' but no relation edge connects them"))
+        return errors
+
+
+class GraphConnectivityRule(Rule):
+    def __init__(self):
+        super().__init__("graph_connectivity", "All non-raw/relation records must have at least one relation edge")
+
+    def check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
+        return []
+
+    def check_global(self, all_records: dict[str, dict]) -> list[str]:
+        errors: list[str] = []
+        connected: set[str] = set()
+        for rec in all_records.values():
+            if rec.get("type") == "relation":
+                f = rec.get("from")
+                t = rec.get("to")
+                if f:
+                    connected.add(f)
+                if t:
+                    connected.add(t)
+        for rid, rec in all_records.items():
+            rtype = rec.get("type")
+            if rtype in ("raw_observation", "relation"):
+                continue
+            if rid not in connected:
+                errors.append(err(E_GRAPH_CONNECTIVITY, rid, "has no relation edges (isolated node)"))
+        return errors
+
+
 # ──────────────────────────────────────────────
 # Registry — grouped by level
 # ──────────────────────────────────────────────
@@ -662,12 +925,13 @@ SCHEMA_RULES: list[Rule] = [
     # field presence (all 15 types)
     FieldPresence({"raw_observation"}, ["text"]),
     FieldPresence({"session"}, ["water_body_id", "datetime_start", "datetime_end"]),
-    FieldPresence({"observation"}, ["conditions", "effort", "result", "missing_factors"]),
+    FieldPresence({"environment"}, ["session_id", "datetime", "water_temp", "pressure_hpa", "wind_speed", "moon_phase", "precipitation", "water_clarity", "water_level"]),
+    FieldPresence({"observation"}, ["conditions", "effort", "result", "missing_factors", "environment_id", "time_of_day", "datetime"]),
     FieldPresence({"hypothesis"}, ["formal_rule", "claim", "confidence"]),
     FieldPresence({"evidence_synthesis"}, ["evidence", "summary"]),
     FieldPresence({"analysis"}, ["status", "analysis", "causal_links"]),
     FieldPresence({"recommendation"}, ["text", "actions"]),
-    FieldPresence({"outcome"}, ["execution_match", "failure_reason"]),
+    FieldPresence({"outcome"}, ["execution_match", "failure_reason", "result"]),
     FieldPresence({"relation"}, ["from", "to", "relation", "weight"]),
     FieldPresence({"dialogue"}, ["messages", "assistant_confidence"]),
     FieldPresence({"fact"}, ["content", "source_reliability"]),
@@ -688,19 +952,26 @@ SCHEMA_RULES: list[Rule] = [
     ObservationCatchRule(),
     ActionSchemaRule(),
     EvidenceSchemaRule(),
+    EvidenceRefTypeRule(),
     CausalLinkRule(),
     MissingFactorsRule(),
+    HypothesisFormalRule(),
+    OutcomeConsistencyRule(),
 ]
 
 SEMANTICS_RULES: list[Rule] = [
     RawImmutable(),
     AnalysisStatusRule(),
     BasedOnRule(),
+    DictionaryRule(),
 ]
 
 GRAPH_RULES: list[Rule] = [
     D8GraphRule(),
     D9CycleRule(),
+    GraphConnectivityRule(),
+    EnvironmentRefRule(),
+    GraphBasedOnConsistencyRule(),
 ]
 
 PER_RECORD_RULES: list[Rule] = [*SCHEMA_RULES, *SEMANTICS_RULES]

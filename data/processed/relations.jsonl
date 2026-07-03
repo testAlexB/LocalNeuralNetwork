@@ -27,3 +27,6 @@
 {"id":"rel00027","type":"relation","schema_version":"1.3","from":"ana00002","to":"dia00002","relation":"derived_from","weight":1.0,"id_prefix":"rel"}
 {"id":"rel00028","type":"relation","schema_version":"1.3","from":"ses00002","to":"env00002","relation":"generated_from","weight":1.0,"id_prefix":"rel"}
 {"id":"rel00029","type":"relation","schema_version":"1.3","from":"ses00003","to":"env00003","relation":"generated_from","weight":1.0,"id_prefix":"rel"}
+{"id":"rel00030","type":"relation","schema_version":"1.3","from":"fac00001","to":"ana00001","relation":"background","weight":0.9,"id_prefix":"rel"}
+{"id":"rel00031","type":"relation","schema_version":"1.3","from":"obs00001","to":"hyp00002","relation":"supports","weight":0.6,"id_prefix":"rel"}
+{"id":"rel00032","type":"relation","schema_version":"1.3","from":"obs00004","to":"hyp00002","relation":"supports","weight":0.6,"id_prefix":"rel"}

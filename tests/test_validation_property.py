@@ -19,8 +19,7 @@ PROFILE = settings(max_examples=20)
 
 # ── Strategies ──
 
-safe_chars = st.characters(min_codepoint=97, max_codepoint=122) | st.characters(min_codepoint=48, max_codepoint=57)
-ids = st.text(min_size=3, max_size=20, alphabet=safe_chars).map(lambda s: "x_" + s)
+ids = st.uuids().map(lambda u: "h_" + str(u).replace("-", "_"))
 
 
 # ── Minimal valid records: must pass ──

@@ -3,20 +3,20 @@
 Single source of truth for record generation — used by both
 deterministic pytest tests and Hypothesis property-based tests.
 """
+import re
 from pathlib import Path
 
 from fishingllm.validate_corpus import (
     check_record, ACCEPTED_SCHEMA_VERSION,
-    VALID_TYPES, VALID_STATUSES, VALID_EVIDENCE_ROLES,
-    VALID_CAUSAL_RELATIONS, VALID_RELATION_TYPES, VALID_ACTION_TYPES,
-    VALID_FAILURE_REASONS, VALID_OPERATORS,
 )
 
 
-# ── Helpers ──
+# Strict parser for "[E_CODE] rid: message" format
+_CODE_RE = re.compile(r"^\[(\w+)\]")
+
 
 def codes(errors: list[str]) -> set[str]:
-    return {e.split("]")[0].lstrip("[") if "]" in e else e for e in errors}
+    return {m.group(1) for e in errors if (m := _CODE_RE.match(e))}
 
 
 def run_check(rec: dict, ctx: dict | None = None) -> list[str]:
@@ -47,6 +47,9 @@ def make(rtype: str, rid: str, *, mode: str = "valid", **overrides) -> dict:
                     "datetime_start": "2024-06-15T05:00:00",
                     "datetime_end": "2024-06-15T12:00:00"},
         "observation": {
+            "environment_id": "env00001",
+            "time_of_day": "утро",
+            "datetime": "2024-06-15T06:00:00",
             "conditions": {"depth": 5, "target_species": "судак"},
             "effort": {"hours_fished": 3.0, "casts": 40},
             "result": {"catch": [{"fish": "судак", "count": 1}]},
@@ -54,7 +57,10 @@ def make(rtype: str, rid: str, *, mode: str = "valid", **overrides) -> dict:
             "observation_quality": 0.7,
         },
         "environment": {"session_id": "ses00001", "datetime": "2024-06-15T05:30:00",
-                        "source": "angler", "water_temp": 18, "pressure_hpa": 748},
+                        "water_temp": 18, "pressure_hpa": 748,
+                        "wind_speed": 2.5, "moon_phase": "полнолуние",
+                        "water_clarity": "прозрачная", "water_level": "нормальный",
+                        "precipitation": "нет"},
         "hypothesis": {
             "claim": "t > 20 снижает активность", "confidence": 0.6,
             "formal_rule": {"variable": "water_temp", "operator": ">", "value": 20},

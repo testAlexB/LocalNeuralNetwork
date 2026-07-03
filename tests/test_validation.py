@@ -7,7 +7,9 @@ from fishingllm.validate_corpus import (
     E_FIELD_REQUIRED, E_FIELD_FORBIDDEN, E_RANGE, E_FIELD_ENUM,
     E_SCHEMA_VERSION, E_DATETIME, E_CATCH_SCHEMA, E_ACTION_SCHEMA,
     E_EVIDENCE, E_CAUSAL_LINK, E_ANALYSIS_STATUS, E_BASED_ON,
-    E_MISSING_FACTORS, E_NFC, E_DUPLICATE,
+    E_MISSING_FACTORS, E_NFC, E_DUPLICATE, E_HYPOTHESIS,
+    E_ENVIRONMENT, E_GRAPH_BASED_ON, E_GRAPH_CONNECTIVITY,
+    E_OUTCOME,
 )
 from test_factory import make, codes, run_check, DATA_DIR
 
@@ -185,6 +187,19 @@ def test_causal_links_confidence_out_of_range():
     rec = make("analysis", "ana_clco")
     rec["causal_links"] = [{"factor": "water_temp", "effect": "catch_rate",
                             "confidence": 1.5}]
+    assert E_CAUSAL_LINK in codes(run_check(rec))
+
+
+def test_causal_links_duplicate():
+    rec = make("analysis", "ana_cldup")
+    link = {"factor": "water_temp", "effect": "catch_rate"}
+    rec["causal_links"] = [link, link]
+    assert E_CAUSAL_LINK in codes(run_check(rec))
+
+
+def test_causal_links_factor_equals_effect():
+    rec = make("analysis", "ana_clfe")
+    rec["causal_links"] = [{"factor": "water_temp", "effect": "water_temp"}]
     assert E_CAUSAL_LINK in codes(run_check(rec))
 
 
@@ -389,13 +404,224 @@ def test_make_minimal_overrides():
     assert rec["conditions"] == {"depth": 3}
 
 
+# ── Environment reference (graph-level) ──
+
+def test_environment_ref_exists():
+    obs = make("observation", "obs_ere")
+    obs["environment_id"] = "env_ref"
+    env = make("environment", "env_ref", mode="minimal",
+               session_id="ses_x", datetime="2024-06-15T06:00:00",
+               water_temp=18, pressure_hpa=750, wind_speed=2,
+               moon_phase="полнолуние", precipitation="нет",
+               water_clarity="прозрачная", water_level="нормальный")
+    rel_env = make("relation", "rel_ere1")
+    rel_env["from"] = "env_ref"
+    rel_env["to"] = "obs_ere"
+    rel_obs = make("relation", "rel_ere2")
+    rel_obs["from"] = "obs_ere"
+    rel_obs["to"] = "env_ref"
+    errs = _validate([env, obs, rel_env, rel_obs])
+    assert E_ENVIRONMENT not in codes(errs)
+
+
+def test_environment_ref_nonexistent():
+    obs = make("observation", "obs_ern")
+    obs["environment_id"] = "env_nonexistent"
+    env = make("environment", "env_real", mode="minimal",
+               session_id="ses_x", datetime="2024-06-15T06:00:00",
+               water_temp=18, pressure_hpa=750, wind_speed=2,
+               moon_phase="полнолуние", precipitation="нет",
+               water_clarity="прозрачная", water_level="нормальный")
+    assert E_ENVIRONMENT in codes(_validate([env, obs]))
+
+
+def test_environment_ref_wrong_type():
+    obs = make("observation", "obs_erwt")
+    obs["environment_id"] = "ses_wrong"
+    ses = make("session", "ses_wrong", mode="minimal",
+               water_body_id="wb_test", datetime_start="2024-06-15T05:00:00",
+               datetime_end="2024-06-15T12:00:00")
+    assert E_ENVIRONMENT in codes(_validate([ses, obs]))
+
+
+# ── Evidence reference type (schema-level) ──
+
+def test_evidence_ref_type_valid():
+    rec = make("evidence_synthesis", "evs_rtv")
+    hyp = make("hypothesis", "hyp_rtv_ref")
+    rec["evidence"] = [{"id": "hyp_rtv_ref", "role": "supports", "weight": 0.8}]
+    assert E_EVIDENCE not in codes(run_check(rec, {"hyp_rtv_ref": hyp}))
+
+
+def test_evidence_ref_type_invalid():
+    rec = make("evidence_synthesis", "evs_rti")
+    rel = make("relation", "rel_rti_ref")
+    rec["evidence"] = [{"id": "rel_rti_ref", "role": "supports", "weight": 0.8}]
+    assert E_EVIDENCE in codes(run_check(rec, {"rel_rti_ref": rel}))
+
+
+# ── Graph-based_on consistency (graph-level) ──
+
+def test_graph_based_on_has_edge():
+    ana = make("analysis", "ana_gbo")
+    evs = make("evidence_synthesis", "evs_gbo_ref")
+    ana["based_on"] = ["evs_gbo_ref"]
+    ana["causal_links"] = []
+    rel = make("relation", "rel_gbo")
+    rel["from"] = "ana_gbo"
+    rel["to"] = "evs_gbo_ref"
+    assert E_GRAPH_BASED_ON not in codes(_validate([ana, evs, rel]))
+
+
+def test_graph_based_on_missing_edge():
+    ana = make("analysis", "ana_gbom")
+    evs = make("evidence_synthesis", "evs_gbom_ref")
+    ana["based_on"] = ["evs_gbom_ref"]
+    ana["causal_links"] = []
+    rel = make("relation", "rel_gbom_other")
+    rel["from"] = "ana_gbom"
+    rel["to"] = "some_other"
+    assert E_GRAPH_BASED_ON in codes(_validate([ana, evs, rel]))
+
+
+# ── Graph connectivity (graph-level) ──
+
+def test_graph_connectivity_no_edges():
+    obs = make("observation", "obs_gc")
+    assert E_GRAPH_CONNECTIVITY in codes(_validate([obs]))
+
+
+def test_graph_connectivity_with_edge():
+    obs = make("observation", "obs_gce")
+    obs_self = make("observation", "obs_gce_self")
+    rel = make("relation", "rel_gce")
+    rel["from"] = "obs_gce"
+    rel["to"] = "obs_gce_self"
+    assert E_GRAPH_CONNECTIVITY not in codes(_validate([obs, obs_self, rel]))
+
+
+# ── Hypothesis formal_rule completeness ──
+
+def test_hypothesis_missing_variable():
+    rec = make("hypothesis", "hyp_mv")
+    rec["formal_rule"] = {"operator": ">", "value": 20}
+    assert E_HYPOTHESIS in codes(run_check(rec))
+
+
+def test_hypothesis_missing_operator():
+    rec = make("hypothesis", "hyp_mo")
+    rec["formal_rule"] = {"variable": "water_temp", "value": 20}
+    rec["claim"] = "test"
+    rec["confidence"] = 0.5
+    assert E_HYPOTHESIS in codes(run_check(rec))
+
+
+def test_hypothesis_type_mismatch_numeric():
+    rec = make("hypothesis", "hyp_tmn")
+    rec["formal_rule"] = {"variable": "water_temp", "operator": ">", "value": "warm"}
+    assert E_HYPOTHESIS in codes(run_check(rec))
+
+
+def test_hypothesis_type_mismatch_list():
+    rec = make("hypothesis", "hyp_tml")
+    rec["formal_rule"] = {"variable": "moon_phase", "operator": "in", "value": "полнолуние"}
+    assert E_HYPOTHESIS in codes(run_check(rec))
+
+
+def test_hypothesis_between_not_list():
+    rec = make("hypothesis", "hyp_btn")
+    rec["formal_rule"] = {"variable": "water_temp", "operator": "between", "value": 20}
+    assert E_HYPOTHESIS in codes(run_check(rec))
+
+
+# ── Causal reasoning ──
+
+def test_causal_links_missing_factor_and_effect():
+    rec = make("analysis", "ana_clm")
+    rec["causal_links"] = [{"relation": "positive", "confidence": 0.5}]
+    assert E_CAUSAL_LINK in codes(run_check(rec))
+
+
+def test_causal_links_empty_factor():
+    rec = make("analysis", "ana_clef")
+    rec["causal_links"] = [{"factor": "", "effect": "catch_rate", "relation": "positive"}]
+    assert E_CAUSAL_LINK in codes(run_check(rec))
+
+
+# ── Missing environment fields (schema-level) ──
+
+def test_environment_missing_wind_speed():
+    rec = make("environment", "env_mws")
+    rec.pop("wind_speed", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+def test_environment_missing_moon_phase():
+    rec = make("environment", "env_mmp")
+    rec.pop("moon_phase", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+def test_environment_missing_precipitation():
+    rec = make("environment", "env_mp")
+    rec.pop("precipitation", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+def test_environment_missing_water_clarity():
+    rec = make("environment", "env_mwc")
+    rec.pop("water_clarity", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+def test_environment_missing_session_id():
+    rec = make("environment", "env_msid")
+    rec.pop("session_id", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+# ── Outcome success invariant (cross-record) ──
+
+def test_outcome_success_empty_catch_true():
+    rec = make("outcome", "out_sect")
+    rec["result"] = {"catch": [], "success": True}
+    assert E_OUTCOME in codes(run_check(rec))
+
+
+def test_outcome_success_nonempty_catch_false():
+    rec = make("outcome", "out_scf")
+    rec["result"] = {"catch": [{"fish": "судак", "count": 2}], "success": False}
+    assert E_OUTCOME in codes(run_check(rec))
+
+
+def test_outcome_success_missing_result():
+    rec = make("outcome", "out_msr")
+    rec.pop("result", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+# ── Observation invariant: environment_id and time_of_day ──
+
+def test_observation_missing_environment_id():
+    rec = make("observation", "obs_meid")
+    rec.pop("environment_id", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+def test_observation_missing_time_of_day():
+    rec = make("observation", "obs_mtod")
+    rec.pop("time_of_day", None)
+    assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
 # ── Helper ──
 
 def _validate(records: list[dict]) -> list[str]:
     with tempfile.TemporaryDirectory() as tmp:
         proc = Path(tmp) / "processed"
         proc.mkdir(parents=True)
+        sorted_records = sorted(records, key=lambda r: (r.get("type", ""), r.get("id", "")))
         with open(proc / "test.jsonl", "w", encoding="utf-8") as f:
-            for r in records:
+            for r in sorted_records:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         return validate_corpus(tmp)
