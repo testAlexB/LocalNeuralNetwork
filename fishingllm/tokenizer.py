@@ -53,9 +53,22 @@ class FishingTokenizer:
             merges=str(path / "merges.txt"),
         )
         self._tokenizer._tokenizer.normalizer = NFC()
+        self.vocab_size = self.get_vocab_size()
 
     def get_vocab_size(self) -> int:
         return self._tokenizer.get_vocab_size()
+
+    @property
+    def bos_token_id(self) -> int | None:
+        return self.token_to_id("<s>")
+
+    @property
+    def eos_token_id(self) -> int | None:
+        return self.token_to_id("</s>")
+
+    @property
+    def pad_token_id(self) -> int | None:
+        return self.token_to_id("<s>")
 
     def token_to_id(self, token: str) -> int | None:
         return self._tokenizer.token_to_id(token)
