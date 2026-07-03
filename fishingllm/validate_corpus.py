@@ -1,0 +1,254 @@
+import json
+import os
+import unicodedata
+from hashlib import sha256
+from pathlib import Path
+from typing import Any
+
+VALID_TYPES = frozenset({
+    "raw_observation", "session", "environment", "observation",
+    "hypothesis", "evidence_synthesis", "analysis", "recommendation",
+    "outcome", "relation", "dialogue", "fact", "experience",
+    "insufficient_data", "uncertainty",
+})
+
+VALID_STATUSES = frozenset({
+    "supported", "rejected", "partially_supported",
+    "insufficient_data", "contradictory",
+})
+
+VALID_EVIDENCE_ROLES = frozenset({"supports", "contradicts", "background"})
+
+VALID_RELATION_TYPES = frozenset({
+    "supports", "contradicts", "derived_from",
+    "generated_from", "validated_by", "background",
+})
+
+VALID_ACTION_TYPES = frozenset({
+    "change_depth", "change_lure", "change_tackle",
+    "change_time", "move_spot", "change_bait",
+})
+
+VALID_FAILURE_REASONS = frozenset({
+    "none", "conditions_not_met", "wrong_spot",
+    "weather_changed", "equipment_difference",
+    "low_activity", "unknown",
+})
+
+
+class CorpusError(Exception):
+    pass
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    records = []
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise CorpusError(f"{path.name}:{i}: invalid JSON — {e}")
+    return records
+
+
+def check_nfc(text: str, path: str, line: int):
+    normalized = unicodedata.normalize("NFC", text)
+    if text != normalized:
+        raise CorpusError(f"{path}:{line}: text is not NFC-normalized")
+
+
+def validate_corpus(data_dir: str | Path) -> list[str]:
+    data_dir = Path(data_dir)
+    errors: list[str] = []
+
+    all_records: dict[str, dict[str, Any]] = {}
+    type_counts: dict[str, int] = {}
+    raw_hashes: dict[str, str] = {}
+
+    processed_dir = data_dir / "processed"
+
+    for jsonl_path in sorted(processed_dir.glob("*.jsonl")):
+        fname = jsonl_path.name
+        records = read_jsonl(jsonl_path)
+        for rec in records:
+            rid = rec.get("id")
+            if not rid:
+                errors.append(f"{fname}: record missing 'id'")
+                continue
+
+            if rid in all_records:
+                errors.append(f"duplicate id '{rid}' in {fname}")
+            all_records[rid] = rec
+
+            rtype = rec.get("type", "unknown")
+            type_counts[rtype] = type_counts.get(rtype, 0) + 1
+
+            # schema_version
+            sv = rec.get("schema_version")
+            if sv is None:
+                errors.append(f"{rid}: missing schema_version")
+
+            # id_prefix consistency
+            prefix = rec.get("id_prefix", "")
+            if prefix and not rid.startswith(prefix):
+                errors.append(f"{rid}: id does not start with id_prefix '{prefix}'")
+
+            # type validity
+            if rtype not in VALID_TYPES:
+                errors.append(f"{rid}: invalid type '{rtype}'")
+
+            # raw_observation immutability (hash on first pass)
+            if rtype == "raw_observation":
+                text = rec.get("text", "")
+                h = sha256(text.encode("utf-8")).hexdigest()
+                if rid in raw_hashes:
+                    if raw_hashes[rid] != h:
+                        errors.append(f"{rid}: raw_observation text has changed")
+                else:
+                    raw_hashes[rid] = h
+
+            # type-specific validation (per-record checks)
+            try:
+                _validate_record(rec, fname, rid)
+            except CorpusError as e:
+                errors.append(str(e))
+
+    # Second pass: cross-record checks
+    # based_on references
+    for rid, rec in all_records.items():
+        based_on = rec.get("based_on", [])
+        if isinstance(based_on, list):
+            for ref in based_on:
+                if ref not in all_records:
+                    errors.append(f"{rid}: based_on references non-existent '{ref}'")
+
+    # D8: all IDs (except raw and relation) must be referenced in relation graph
+    relation_targets = set()
+    for rec in all_records.values():
+        if rec.get("type") == "relation":
+            relation_targets.add(rec.get("from"))
+            relation_targets.add(rec.get("to"))
+
+    for rid, rec in all_records.items():
+        rtype = rec.get("type")
+        if rtype in ("raw_observation", "relation"):
+            continue
+        if rid not in relation_targets:
+            errors.append(f"{rid}: not referenced in any relation (D8)")
+
+    # D9: no cycles in derived_from chain
+    derived = {}
+    for rec in all_records.values():
+        if rec.get("type") == "relation" and rec.get("relation") == "derived_from":
+            derived[rec["from"]] = rec["to"]
+    for start in derived:
+        visited = set()
+        current = start
+        while current in derived:
+            if current in visited:
+                errors.append(f"cycle in derived_from graph involving '{current}'")
+                break
+            visited.add(current)
+            current = derived[current]
+
+    return errors
+
+
+def _validate_record(rec: dict, fname: str = "", rid: str = ""):
+    rtype = rec.get("type")
+
+    if rtype == "raw_observation":
+        if not isinstance(rec.get("text"), str) or not rec["text"].strip():
+            raise CorpusError(f"{rid}: raw_observation.text is required")
+        check_nfc(rec["text"], fname, 0)
+
+    elif rtype == "session":
+        if not rec.get("water_body_id"):
+            raise CorpusError(f"{rid}: session.water_body_id is required")
+        if not rec.get("datetime_start") or not rec.get("datetime_end"):
+            raise CorpusError(f"{rid}: session requires datetime_start and datetime_end")
+
+    elif rtype == "observation":
+        # D1: no success field
+        if "success" in rec:
+            raise CorpusError(f"{rid}: observation.success is forbidden (D1)")
+        # conditions + effort + result
+        if "conditions" not in rec:
+            raise CorpusError(f"{rid}: observation.conditions is required")
+        if "effort" not in rec:
+            raise CorpusError(f"{rid}: observation.effort is required")
+        if "result" not in rec:
+            raise CorpusError(f"{rid}: observation.result is required")
+        # catch must be array
+        catch = rec["result"].get("catch", [])
+        if not isinstance(catch, list):
+            raise CorpusError(f"{rid}: result.catch must be an array")
+        # D2: no interpretations — no strict check, advisory
+        # missing_factors must be array of strings
+        mf = rec.get("missing_factors", [])
+        if not isinstance(mf, list):
+            raise CorpusError(f"{rid}: missing_factors must be an array")
+
+    elif rtype == "hypothesis":
+        # D3: formal_rule required
+        fr = rec.get("formal_rule")
+        if not isinstance(fr, dict):
+            raise CorpusError(f"{rid}: hypothesis.formal_rule is required (D3)")
+        if not fr.get("variable") or not fr.get("operator"):
+            raise CorpusError(f"{rid}: formal_rule.variable and operator are required")
+        fr.get("value")  # value can be any, but must exist
+        if "value" not in fr:
+            raise CorpusError(f"{rid}: formal_rule.value is required")
+
+    elif rtype == "evidence_synthesis":
+        ev = rec.get("evidence", [])
+        if not isinstance(ev, list):
+            raise CorpusError(f"{rid}: evidence must be an array")
+        for i, e in enumerate(ev):
+            if e.get("role") not in VALID_EVIDENCE_ROLES:
+                raise CorpusError(f"{rid}: evidence[{i}].role '{e.get('role')}' invalid")
+            w = e.get("weight")
+            if not isinstance(w, (int, float)) or not (0 <= w <= 1):
+                raise CorpusError(f"{rid}: evidence[{i}].weight must be 0..1 (D4)")
+
+    elif rtype == "analysis":
+        status = rec.get("status")
+        if status not in VALID_STATUSES:
+            raise CorpusError(f"{rid}: analysis.status '{status}' invalid")
+        # causal_links validation
+        for cl in rec.get("causal_links", []):
+            if not cl.get("factor") or not cl.get("effect"):
+                raise CorpusError(f"{rid}: causal_link requires factor and effect")
+
+    elif rtype == "recommendation":
+        # D5: text + actions
+        if not rec.get("text"):
+            raise CorpusError(f"{rid}: recommendation.text is required (D5)")
+        actions = rec.get("actions", [])
+        if not isinstance(actions, list) or len(actions) == 0:
+            raise CorpusError(f"{rid}: recommendation.actions[] is required (D5)")
+        for i, a in enumerate(actions):
+            if a.get("type") not in VALID_ACTION_TYPES:
+                raise CorpusError(f"{rid}: actions[{i}].type '{a.get('type')}' not in allowed DSL")
+
+    elif rtype == "outcome":
+        em = rec.get("execution_match")
+        if not isinstance(em, (int, float)) or not (0 <= em <= 1):
+            raise CorpusError(f"{rid}: outcome.execution_match must be 0..1 (D6)")
+        fr = rec.get("failure_reason")
+        if not fr:
+            raise CorpusError(f"{rid}: outcome.failure_reason is required (D6)")
+        if fr not in VALID_FAILURE_REASONS:
+            raise CorpusError(f"{rid}: failure_reason '{fr}' not in dictionary")
+
+    elif rtype == "relation":
+        if rec.get("relation") not in VALID_RELATION_TYPES:
+            raise CorpusError(f"{rid}: relation type '{rec.get('relation')}' invalid")
+        if not rec.get("from") or not rec.get("to"):
+            raise CorpusError(f"{rid}: relation.from and .to are required")
+        w = rec.get("weight")
+        if not isinstance(w, (int, float)) or not (0 <= w <= 1):
+            raise CorpusError(f"{rid}: relation.weight must be 0..1")
