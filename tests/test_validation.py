@@ -9,7 +9,7 @@ from fishingllm.validate_corpus import (
     E_EVIDENCE, E_CAUSAL_LINK, E_ANALYSIS_STATUS, E_BASED_ON,
     E_MISSING_FACTORS, E_NFC, E_DUPLICATE, E_HYPOTHESIS,
     E_ENVIRONMENT, E_GRAPH_BASED_ON, E_GRAPH_CONNECTIVITY,
-    E_OUTCOME,
+    E_OUTCOME, E_CYCLE,
 )
 from test_factory import make, codes, run_check, DATA_DIR
 
@@ -534,6 +534,29 @@ def test_hypothesis_between_not_list():
     assert E_HYPOTHESIS in codes(run_check(rec))
 
 
+# ── NestedFieldEnum message (regression: f-string contained literal ".join") ──
+
+def test_nested_field_enum_error_message():
+    rec = make("hypothesis", "hyp_nfe")
+    rec["formal_rule"] = {"variable": "water_temp", "operator": "bad_op", "value": 20}
+    errs = run_check(rec)
+    for e in errs:
+        assert "'.join" not in e, f"NestedFieldEnum message contains literal '.join': {e}"
+        assert "self._path" not in e, f"NestedFieldEnum message contains literal '_path': {e}"
+
+
+# ── BasedOnRule: unsupported type gives single error, not per-ref ──
+
+def test_based_on_unsupported_type_single_error():
+    rec = make("observation", "obs_bon")
+    rec["based_on"] = ["obs_ref1", "obs_ref2"]
+    obs_ref1 = make("observation", "obs_ref1")
+    obs_ref2 = make("observation", "obs_ref2")
+    errs = run_check(rec, {"obs_ref1": obs_ref1, "obs_ref2": obs_ref2})
+    e_based_on = [e for e in errs if e.startswith("[E_BASED_ON]")]
+    assert len(e_based_on) == 1, f"expected 1 E_BASED_ON error, got {len(e_based_on)}: {e_based_on}"
+
+
 # ── Causal reasoning ──
 
 def test_causal_links_missing_factor_and_effect():
@@ -612,6 +635,31 @@ def test_observation_missing_time_of_day():
     rec = make("observation", "obs_mtod")
     rec.pop("time_of_day", None)
     assert E_FIELD_REQUIRED in codes(run_check(rec))
+
+
+# ── D9: derived_from multi-edge (regression: old code overwrote multiple edges) ──
+
+def test_d9_no_false_cycle_on_dag():
+    a = make("analysis", "ana_d9_dag")
+    a["based_on"] = ["evs_dag"]
+    a["causal_links"] = []
+    evs = make("evidence_synthesis", "evs_dag")
+    evs["evidence"] = [{"id": "obs_dag", "role": "supports", "weight": 0.8}]
+    obs = make("observation", "obs_dag")
+    rel1 = make("relation", "rel_d9_1")
+    rel1["from"] = "evs_dag"
+    rel1["to"] = "ana_d9_dag"
+    rel1["relation"] = "derived_from"
+    rel2 = make("relation", "rel_d9_2")
+    rel2["from"] = "evs_dag"
+    rel2["to"] = "obs_dag"
+    rel2["relation"] = "derived_from"
+    rel3 = make("relation", "rel_d9_3")
+    rel3["from"] = "ana_d9_dag"
+    rel3["to"] = "obs_dag"
+    rel3["relation"] = "supports"
+    errs = _validate([a, evs, obs, rel1, rel2, rel3])
+    assert E_CYCLE not in codes(errs)
 
 
 # ── Helper ──

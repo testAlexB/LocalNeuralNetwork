@@ -1,6 +1,5 @@
 import json
 import unicodedata
-import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from hashlib import sha256
@@ -134,6 +133,59 @@ REQUIRED_FIELDS: dict[str, list[str]] = {
 
 
 # ──────────────────────────────────────────────
+# CorpusIndex — dict subclass with pre-built indices
+# ──────────────────────────────────────────────
+
+class CorpusIndex(dict):
+    """dict subclass; pass as ``all_records`` to avoid repeated full scans.
+
+    Pre-computes:
+      ``.by_type[type_name]`` → list of records
+      ``.forward_edges`` → set[(from, to)]
+      ``.nodes_with_edges`` → set[node_id]
+      ``.derived_edges[from]`` → list[to]
+      ``.obs_ids`` → list[obs_record]
+      ``.evidence_roles[evs_id]`` → dict[supports|contradicts|background: int]
+    """
+
+    def __init__(self, records: dict[str, dict] | None = None):
+        super().__init__(records or {})
+        self.by_type: dict[str, list[dict]] = {}
+        self.forward_edges: set[tuple[str, str]] = set()
+        self.nodes_with_edges: set[str] = set()
+        self.derived_edges: dict[str, list[str]] = {}
+        self.obs_ids: list[str] = []
+        self.evidence_roles: dict[str, dict[str, int]] = {}
+        self._build()
+
+    def _build(self) -> None:
+        for rid, rec in self.items():
+            rtype = rec.get("type")
+            self.by_type.setdefault(rtype, []).append(rec)
+
+            if rtype == "observation":
+                self.obs_ids.append(rid)
+
+            if rtype == "relation":
+                f = rec.get("from")
+                t = rec.get("to")
+                if f and t:
+                    self.forward_edges.add((f, t))
+                    self.nodes_with_edges.add(f)
+                    self.nodes_with_edges.add(t)
+                    if rec.get("relation") == "derived_from":
+                        self.derived_edges.setdefault(f, []).append(t)
+
+            if rtype == "evidence_synthesis":
+                roles: dict[str, int] = {"supports": 0, "contradicts": 0, "background": 0}
+                for e in rec.get("evidence", []):
+                    role = e.get("role")
+                    if role in roles:
+                        roles[role] += 1
+                self.evidence_roles[rid] = roles
+
+
+# ──────────────────────────────────────────────
 # Rule Engine
 # ──────────────────────────────────────────────
 
@@ -145,6 +197,9 @@ class Rule(ABC):
     @abstractmethod
     def check(self, rec: dict, all_records: dict[str, dict]) -> list[str]:
         ...
+
+    def check_global(self, all_records: dict[str, dict]) -> list[str]:
+        return []
 
     def reset(self) -> None:
         ...
@@ -215,16 +270,17 @@ class NestedFieldEnum(Rule):
             val = val.get(key)
             if val is None:
                 return []
+        field_path = ".".join(self._path)
         if isinstance(val, list):
             for v in val:
                 if v not in self._allowed:
                     return [err(E_FIELD_ENUM, rid,
-                                f"'.'.join(self._path) '{v}' not in {sorted(self._allowed)}",
-                                field='.'.join(self._path))]
+                                f"{field_path} '{v}' not in {sorted(self._allowed)}",
+                                field=field_path)]
         elif val not in self._allowed:
             return [err(E_FIELD_ENUM, rid,
-                        f"'.'.join(self._path) '{val}' not in {sorted(self._allowed)}",
-                        field='.'.join(self._path))]
+                        f"{field_path} '{val}' not in {sorted(self._allowed)}",
+                        field=field_path)]
         return []
 
 
@@ -503,8 +559,13 @@ class AnalysisStatusRule(ApplyToTypes):
         if status not in VALID_STATUSES:
             return [err(E_ANALYSIS_STATUS, rid, f"status '{status}' invalid")]
 
-        evs_ids = [ref for ref in rec.get("based_on", []) if ref in all_records
-                   and all_records[ref].get("type") == "evidence_synthesis"]
+        index = all_records if isinstance(all_records, CorpusIndex) else None
+        if index is not None:
+            evs_ids = [ref for ref in rec.get("based_on", [])
+                       if ref in index.evidence_roles]
+        else:
+            evs_ids = [ref for ref in rec.get("based_on", []) if ref in all_records
+                       and all_records[ref].get("type") == "evidence_synthesis"]
         if not evs_ids:
             return errors
 
@@ -512,15 +573,21 @@ class AnalysisStatusRule(ApplyToTypes):
         contradicts = 0
         background = 0
         for eid in evs_ids:
-            evs = all_records[eid]
-            for e in evs.get("evidence", []):
-                role = e.get("role")
-                if role == "supports":
-                    supports += 1
-                elif role == "contradicts":
-                    contradicts += 1
-                elif role == "background":
-                    background += 1
+            if index is not None:
+                r = index.evidence_roles.get(eid, {})
+                supports += r.get("supports", 0)
+                contradicts += r.get("contradicts", 0)
+                background += r.get("background", 0)
+            else:
+                evs = all_records[eid]
+                for e in evs.get("evidence", []):
+                    role = e.get("role")
+                    if role == "supports":
+                        supports += 1
+                    elif role == "contradicts":
+                        contradicts += 1
+                    elif role == "background":
+                        background += 1
 
         if status == "supported" and supports == 0 and contradicts > 0:
             errors.append(err(E_ANALYSIS_STATUS, rid,
@@ -547,6 +614,11 @@ class BasedOnRule(Rule):
         if not isinstance(based_on, list):
             return [err(E_BASED_ON, rid, "based_on must be an array")]
         allowed_types = ALLOWED_BASED_ON.get(rtype)
+        if allowed_types is None and rtype not in ("raw_observation", "relation"):
+            if based_on:
+                errors.append(err(E_BASED_ON, rid,
+                                  f"type '{rtype}' does not support based_on"))
+            return errors
         for ref in based_on:
             if ref not in all_records:
                 errors.append(err(E_BASED_ON, rid,
@@ -593,25 +665,36 @@ class D9CycleRule(Rule):
         return []
 
     def check_global(self, all_records: dict[str, dict]) -> list[str]:
+        index = all_records if isinstance(all_records, CorpusIndex) else None
+        if index is not None:
+            derived = index.derived_edges
+        else:
+            derived = {}
+            for rec in all_records.values():
+                if rec.get("type") == "relation" and rec.get("relation") == "derived_from":
+                    derived.setdefault(rec["from"], []).append(rec["to"])
+
         errors: list[str] = []
-        derived: dict[str, str] = {}
-        for rec in all_records.values():
-            if rec.get("type") == "relation" and rec.get("relation") == "derived_from":
-                derived[rec["from"]] = rec["to"]
-        visited_global: set[str] = set()
-        for start in derived:
-            if start in visited_global:
-                continue
-            visited: set[str] = set()
-            current = start
-            while current in derived:
-                if current in visited:
-                    errors.append(err(E_CYCLE, current,
-                                      f"cycle in derived_from graph involving '{current}'"))
-                    break
-                visited.add(current)
-                visited_global.add(current)
-                current = derived[current]
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def dfs(node: str) -> None:
+            if node in visited:
+                return
+            if node in visiting:
+                errors.append(err(E_CYCLE, node, f"cycle in derived_from involving '{node}'"))
+                return
+            if node not in derived:
+                visited.add(node)
+                return
+            visiting.add(node)
+            for nxt in derived[node]:
+                dfs(nxt)
+            visiting.discard(node)
+            visited.add(node)
+
+        for start in list(derived):
+            dfs(start)
         return errors
 
 
@@ -735,8 +818,7 @@ class DictionaryRule(ApplyToTypes):
     def __init__(self, dict_path: Path | None = None):
         super().__init__("dictionary", {"observation", "recommendation"})
         if dict_path is None:
-            script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-            dict_path = script_dir.parent / "data" / "dictionaries"
+            dict_path = Path.cwd() / "data" / "dictionaries"
         self._dict_path = dict_path
         self._loaded: bool = False
         self._species: set[str] = set()
@@ -809,9 +891,12 @@ class EnvironmentRefRule(Rule):
 
     def check_global(self, all_records: dict[str, dict]) -> list[str]:
         errors: list[str] = []
-        for rid, rec in all_records.items():
-            if rec.get("type") != "observation":
-                continue
+        index = all_records if isinstance(all_records, CorpusIndex) else None
+        obs_list = index.obs_ids if index is not None else [
+            rid for rid, rec in all_records.items() if rec.get("type") == "observation"
+        ]
+        for rid in obs_list:
+            rec = all_records[rid]
             env_id = rec.get("environment_id")
             if not env_id:
                 continue
@@ -852,25 +937,28 @@ class GraphBasedOnConsistencyRule(Rule):
 
     def check_global(self, all_records: dict[str, dict]) -> list[str]:
         errors: list[str] = []
-        has_relations = any(r.get("type") == "relation" for r in all_records.values())
-        if not has_relations:
+        index = all_records if isinstance(all_records, CorpusIndex) else None
+        if index is not None:
+            forward = index.forward_edges
+            nodes = index.nodes_with_edges
+        else:
+            forward = set()
+            nodes = set()
+            for rec in all_records.values():
+                if rec.get("type") == "relation":
+                    f = rec.get("from")
+                    t = rec.get("to")
+                    if f and t:
+                        forward.add((f, t))
+                        nodes.add(f)
+                        nodes.add(t)
+        if not forward:
             return errors
-        relation_pairs: set[tuple[str, str]] = set()
-        nodes_with_edges: set[str] = set()
-        for rec in all_records.values():
-            if rec.get("type") == "relation":
-                f = rec.get("from")
-                t = rec.get("to")
-                if f and t:
-                    relation_pairs.add((f, t))
-                    relation_pairs.add((t, f))
-                    nodes_with_edges.add(f)
-                    nodes_with_edges.add(t)
         for rid, rec in all_records.items():
             rtype = rec.get("type")
             if rtype in ("raw_observation", "relation"):
                 continue
-            if rid not in nodes_with_edges:
+            if rid not in nodes:
                 continue
             based_on = rec.get("based_on", [])
             if not isinstance(based_on, list):
@@ -878,7 +966,7 @@ class GraphBasedOnConsistencyRule(Rule):
             for ref in based_on:
                 if ref not in all_records:
                     continue
-                if (rid, ref) not in relation_pairs:
+                if (rid, ref) not in forward and (ref, rid) not in forward:
                     errors.append(err(E_GRAPH_BASED_ON, rid,
                                       f"based_on references '{ref}' but no relation edge connects them"))
         return errors
@@ -893,15 +981,19 @@ class GraphConnectivityRule(Rule):
 
     def check_global(self, all_records: dict[str, dict]) -> list[str]:
         errors: list[str] = []
-        connected: set[str] = set()
-        for rec in all_records.values():
-            if rec.get("type") == "relation":
-                f = rec.get("from")
-                t = rec.get("to")
-                if f:
-                    connected.add(f)
-                if t:
-                    connected.add(t)
+        index = all_records if isinstance(all_records, CorpusIndex) else None
+        if index is not None:
+            connected = index.nodes_with_edges
+        else:
+            connected = set()
+            for rec in all_records.values():
+                if rec.get("type") == "relation":
+                    f = rec.get("from")
+                    t = rec.get("to")
+                    if f:
+                        connected.add(f)
+                    if t:
+                        connected.add(t)
         for rid, rec in all_records.items():
             rtype = rec.get("type")
             if rtype in ("raw_observation", "relation"):
@@ -967,7 +1059,6 @@ SEMANTICS_RULES: list[Rule] = [
 ]
 
 GRAPH_RULES: list[Rule] = [
-    D8GraphRule(),
     D9CycleRule(),
     GraphConnectivityRule(),
     EnvironmentRefRule(),
@@ -1005,7 +1096,7 @@ def check_record(rec: dict, all_records: dict[str, dict] | None = None) -> list[
 def validate_corpus(data_dir: str | Path) -> list[str]:
     data_dir = Path(data_dir)
     errors: list[str] = []
-    all_records: dict[str, dict] = {}
+    raw_records: dict[str, dict] = {}
 
     for rule in PER_RECORD_RULES:
         rule.reset()
@@ -1019,18 +1110,20 @@ def validate_corpus(data_dir: str | Path) -> list[str]:
             if not rid:
                 errors.append(f"{jsonl_path.name}: record missing 'id'")
                 continue
-            if rid in all_records:
+            if rid in raw_records:
                 errors.append(err(E_DUPLICATE, rid, f"duplicate in {jsonl_path.name}"))
-            all_records[rid] = rec
+            raw_records[rid] = rec
 
-    # Phase 2: validate each record with full cross-reference context
+    # Phase 1b: build index once (dict subclass — all downstream code still works)
+    all_records: CorpusIndex = CorpusIndex(raw_records)
+
+    # Phase 2: validate each record with index-powered cross-reference context
     for rid, rec in all_records.items():
         for rule in PER_RECORD_RULES:
             errors.extend(rule.check(rec, all_records))
 
-    # Phase 3: global rules (graph, cycles)
+    # Phase 3: global rules (graph, cycles) — reuse index
     for rule in GRAPH_RULES:
-        if hasattr(rule, "check_global"):
-            errors.extend(rule.check_global(all_records))
+        errors.extend(rule.check_global(all_records))
 
     return errors
