@@ -104,9 +104,13 @@ class TestBatch:
         decoded = trained_tokenizer.decode_batch(ids_batch)
         assert decoded == texts
 
+    def test_encode_batch_empty(self, trained_tokenizer):
+        batch = trained_tokenizer.encode_batch([])
+        assert batch == []
+
 
 class TestSaveLoad:
-    def test_save_load_roundtrip(self, trained_tokenizer):
+    def test_save_load_roundtrip_encode(self, trained_tokenizer):
         with tempfile.TemporaryDirectory() as tmp_dir:
             trained_tokenizer.save(tmp_dir)
             new_tok = FishingTokenizer(vocab_size=500)
@@ -115,6 +119,23 @@ class TestSaveLoad:
             ids_original = trained_tokenizer.encode(text)
             ids_loaded = new_tok.encode(text)
             assert ids_original == ids_loaded
+
+    def test_save_load_roundtrip_decode(self, trained_tokenizer):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trained_tokenizer.save(tmp_dir)
+            new_tok = FishingTokenizer(vocab_size=500)
+            new_tok.load(tmp_dir)
+            text = "щука на спиннинг"
+            ids_loaded = new_tok.encode(text)
+            decoded = new_tok.decode(ids_loaded)
+            assert decoded == text
+
+    def test_save_load_syncs_vocab_size(self, trained_tokenizer):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trained_tokenizer.save(tmp_dir)
+            new_tok = FishingTokenizer(vocab_size=999)
+            new_tok.load(tmp_dir)
+            assert new_tok.vocab_size == new_tok.get_vocab_size()
 
 
 class TestLookups:
@@ -137,10 +158,20 @@ class TestLookups:
 
 
 class TestNormalization:
-    def test_nfc_normalization(self):
-        tok = FishingTokenizer(vocab_size=500)
-        composed = "\u0401"  # Ё как один символ
-        decomposed = "\u0415\u0308"  # Е + ¨
-        ids_composed = tok.encode(composed)
-        ids_decomposed = tok.encode(decomposed)
+    def test_nfc_after_training(self, trained_tokenizer):
+        composed = "\u0401"
+        decomposed = "\u0415\u0308"
+        ids_composed = trained_tokenizer.encode(composed)
+        ids_decomposed = trained_tokenizer.encode(decomposed)
         assert ids_composed == ids_decomposed
+
+    def test_nfc_after_load(self, trained_tokenizer):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            trained_tokenizer.save(tmp_dir)
+            loaded = FishingTokenizer(vocab_size=500)
+            loaded.load(tmp_dir)
+            composed = "\u0401"
+            decomposed = "\u0415\u0308"
+            ids_composed = loaded.encode(composed)
+            ids_decomposed = loaded.encode(decomposed)
+            assert ids_composed == ids_decomposed
